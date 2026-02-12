@@ -7,7 +7,7 @@ const ribThicks = [6, 10];
 const bowlCounts = [2, 3, 4];
 
 // ═══════════════════════════════════════════════════════════
-// generateRibSVG — CNC/3D print rib export
+// generateRibSVG — laser cutting rib export
 // ═══════════════════════════════════════════════════════════
 describe("generateRibSVG", () => {
   it.each(profileKeys)("%s — produces valid SVG", (k) => {
@@ -18,6 +18,59 @@ describe("generateRibSVG", () => {
     expect(svg).toContain("<svg");
     expect(svg).toContain("</svg>");
     expect(svg).toContain("xmlns");
+  });
+
+  it.each(profileKeys)("%s — has UTF-8 encoding in XML declaration", (k) => {
+    const p = PROFILES[k];
+    const bowls = nest(p, 2, 3);
+    const svg = generateRibSVG(bowls, p, 45, 8);
+    expect(svg).toContain('encoding="UTF-8"');
+  });
+
+  it.each(profileKeys)("%s — has SVG version 1.1", (k) => {
+    const p = PROFILES[k];
+    const bowls = nest(p, 2, 3);
+    const svg = generateRibSVG(bowls, p, 45, 8);
+    expect(svg).toContain('version="1.1"');
+  });
+
+  it.each(profileKeys)("%s — cut lines use red #FF0000 stroke", (k) => {
+    const p = PROFILES[k];
+    const bowls = nest(p, 2, 3);
+    const svg = generateRibSVG(bowls, p, 45, 8);
+    expect(svg).toContain('stroke="#FF0000"');
+  });
+
+  it.each(profileKeys)("%s — cut lines use hairline 0.01 stroke-width", (k) => {
+    const p = PROFILES[k];
+    const bowls = nest(p, 2, 3);
+    const svg = generateRibSVG(bowls, p, 45, 8);
+    expect(svg).toContain('stroke-width="0.01"');
+  });
+
+  it.each(profileKeys)("%s — has separate cut and engrave layers", (k) => {
+    const p = PROFILES[k];
+    const bowls = nest(p, 2, 3);
+    const svg = generateRibSVG(bowls, p, 45, 8);
+    expect(svg).toContain('id="cut"');
+    expect(svg).toContain('id="engrave"');
+  });
+
+  it.each(profileKeys)("%s — engrave layer uses black fill", (k) => {
+    const p = PROFILES[k];
+    const bowls = nest(p, 2, 3);
+    const svg = generateRibSVG(bowls, p, 45, 8);
+    expect(svg).toContain('fill="#000000"');
+  });
+
+  it.each(profileKeys)("%s — no duplicate path overlapping polygon (no double-cut)", (k) => {
+    const p = PROFILES[k];
+    const bowls = nest(p, 2, 3);
+    const svg = generateRibSVG(bowls, p, 45, 8);
+    // Cut layer should only have polygon elements, no path elements
+    const cutLayer = svg.split('id="cut"')[1].split("</g>")[0];
+    expect(cutLayer).toContain("<polygon");
+    expect(cutLayer).not.toContain("<path");
   });
 
   it.each(profileKeys)("%s — contains profile name in header", (k) => {
@@ -38,12 +91,11 @@ describe("generateRibSVG", () => {
     }
   });
 
-  it.each(profileKeys)("%s — contains polygon and path elements", (k) => {
+  it.each(profileKeys)("%s — contains polygon elements", (k) => {
     const p = PROFILES[k];
     const bowls = nest(p, 2, 3);
     const svg = generateRibSVG(bowls, p, 45, 8);
     expect(svg).toContain("<polygon");
-    expect(svg).toContain("<path");
   });
 
   it.each(profileKeys)("%s — viewBox and dimensions are in mm", (k) => {
@@ -62,7 +114,7 @@ describe("generateRibSVG", () => {
   });
 
   // Matrix: every profile × bowl count × edge angle × rib thickness
-  describe("full matrix — no crashes", () => {
+  describe("full matrix — no crashes, laser-valid", () => {
     for (const k of profileKeys) {
       for (const nB of bowlCounts) {
         for (const angle of edgeAngles) {
@@ -74,9 +126,13 @@ describe("generateRibSVG", () => {
               const svg = generateRibSVG(bowls, p, angle, thick);
               expect(svg).toContain("<svg");
               expect(svg).toContain("</svg>");
-              // Check polygon points aren't NaN or Infinity
               expect(svg).not.toContain("NaN");
               expect(svg).not.toContain("Infinity");
+              // Laser specs present in every combination
+              expect(svg).toContain('encoding="UTF-8"');
+              expect(svg).toContain('version="1.1"');
+              expect(svg).toContain("#FF0000");
+              expect(svg).toContain('stroke-width="0.01"');
             });
           }
         }
@@ -96,6 +152,20 @@ describe("generateTemplateSVG", () => {
     expect(svg).toContain("<?xml version");
     expect(svg).toContain("<svg");
     expect(svg).toContain("</svg>");
+  });
+
+  it.each(profileKeys)("%s — has UTF-8 encoding", (k) => {
+    const p = PROFILES[k];
+    const bowls = nest(p, 2, 3);
+    const svg = generateTemplateSVG(bowls, p, 45, 8);
+    expect(svg).toContain('encoding="UTF-8"');
+  });
+
+  it.each(profileKeys)("%s — has SVG version 1.1", (k) => {
+    const p = PROFILES[k];
+    const bowls = nest(p, 2, 3);
+    const svg = generateTemplateSVG(bowls, p, 45, 8);
+    expect(svg).toContain('version="1.1"');
   });
 
   it.each(profileKeys)("%s — A4 landscape dimensions (297×210mm)", (k) => {
@@ -124,9 +194,8 @@ describe("generateTemplateSVG", () => {
     const p = PROFILES[k];
     const bowls = nest(p, 2, 3);
     const svg = generateTemplateSVG(bowls, p, 45, 8);
-    // Should have multiple crop mark lines
     const lineCount = (svg.match(/<line /g) || []).length;
-    expect(lineCount).toBeGreaterThanOrEqual(8); // 4 corners × 2 lines each
+    expect(lineCount).toBeGreaterThanOrEqual(8);
   });
 
   it.each(profileKeys)("%s — has calibration ruler", (k) => {
@@ -172,6 +241,8 @@ describe("generateTemplateSVG", () => {
               expect(svg).toContain("</svg>");
               expect(svg).not.toContain("NaN");
               expect(svg).not.toContain("Infinity");
+              expect(svg).toContain('encoding="UTF-8"');
+              expect(svg).toContain('version="1.1"');
             });
           }
         }
@@ -209,7 +280,6 @@ describe("generateProfileJSON", () => {
     const p = PROFILES[k];
     const json = generateProfileJSON(p, p.name);
     const data = JSON.parse(json);
-    // Re-generate from parsed data should be identical
     const json2 = generateProfileJSON(data, data.name);
     expect(json2).toBe(json);
   });

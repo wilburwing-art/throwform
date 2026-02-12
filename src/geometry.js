@@ -362,8 +362,14 @@ export function rimGeometry(type, iR, oR, h, lipH, overhang, wt, tx, ty, side) {
 // EXPORT CONTENT GENERATORS — pure functions returning strings
 // ═══════════════════════════════════════════════════════════
 
-// Generate rib tool SVG string for CNC/3D print
-export function generateRibSVG(bowls, p, edgeAngle, ribThick, colors = { inner: "#7a9a7e", outer: "#8c7e6f" }) {
+// Generate rib tool SVG string for laser cutting / CNC
+// Uses laser-standard conventions: red (#FF0000) hairline stroke for cut lines,
+// black (#000000) for engrave/score text, separated into layers
+export function generateRibSVG(bowls, p, edgeAngle, ribThick) {
+  const CUT = "#FF0000";
+  const ENGRAVE = "#000000";
+  const HAIRLINE = "0.01";
+
   const edgeExt = ribThick / (2 * Math.tan((edgeAngle / 2) * Math.PI / 180));
   const tools = [];
   bowls.forEach((b, i) => {
@@ -379,26 +385,41 @@ export function generateRibSVG(bowls, p, edgeAngle, ribThick, colors = { inner: 
     const innerWork = innerWall.map(([r, h]) => [ribThick + (r - innerBaseR) * sweepScale + edgeExt, h + stepH]);
     const innerBack = [[-edgeExt, 0], [-edgeExt, maxH]];
     const innerStepR = [[ribThick + edgeExt, 0]];
-    tools.push({ label: `B${i + 1}-Inner-${b.rim.toFixed(0)}mm`, c: colors.inner, work: innerWork, back: innerBack, maxH, stepR: innerStepR });
+    tools.push({ label: `B${i + 1}-Inner-${b.rim.toFixed(0)}mm`, work: innerWork, back: innerBack, maxH, stepR: innerStepR });
     const outerStraight = [[ribThick + edgeExt, 0], [ribThick + edgeExt, stepH]];
     const outerCurve = outerWall.map(([r, h]) => [ribThick + (r - outerBaseR) * sweepScale + edgeExt, h + stepH]);
-    tools.push({ label: `B${i + 1}-Outer-${b.rim.toFixed(0)}mm`, c: colors.outer, work: [...outerStraight, ...outerCurve], back: [[-edgeExt, 0], [-edgeExt, maxH]], maxH, stepR: null });
+    tools.push({ label: `B${i + 1}-Outer-${b.rim.toFixed(0)}mm`, work: [...outerStraight, ...outerCurve], back: [[-edgeExt, 0], [-edgeExt, maxH]], maxH, stepR: null });
   });
 
   const mh = Math.max(...tools.map(t => t.maxH)) + 30;
   let tw = 20; tools.forEach(t => { const xs = [...t.work.map(q => q[0]), ...t.back.map(q => q[0])]; tw += (Math.max(...xs) - Math.min(...xs)) + 30; });
 
-  let svg = `<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${tw} ${mh}" width="${tw}mm" height="${mh}mm">\n<text x="10" y="14" font-family="monospace" font-size="8" fill="#888">${p.name} Rib Set (Inner+Outer) — 1:1mm — ${edgeAngle}°</text>\n`;
+  let svg = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 ${tw} ${mh}" width="${tw}mm" height="${mh}mm">\n`;
+  // Engrave layer — text labels (separate from cut geometry)
+  svg += `<g id="engrave" stroke="none" fill="${ENGRAVE}">\n`;
+  svg += `<text x="10" y="14" font-family="monospace" font-size="8">${p.name} Rib Set (Inner+Outer) — 1:1mm — ${edgeAngle}°</text>\n`;
+
   let xO = 20;
+  const toolOffsets = [];
   tools.forEach(t => {
     const xs = [...t.work.map(q => q[0]), ...t.back.map(q => q[0]), ...(t.stepR || []).map(q => q[0])];
     const minX = Math.min(...xs), w = Math.max(...xs) - minX;
-    const px = (x, h) => `${(x - minX).toFixed(2)},${(t.maxH - h).toFixed(2)}`;
-    const pts = [...t.back.map(([x,h])=>px(x,h)), ...[...t.work].reverse().map(([x,h])=>px(x,h)), ...(t.stepR||[]).map(([x,h])=>px(x,h))].join(" ");
-    const wPath = t.work.map(([x, h], j) => `${j === 0 ? "M" : "L"}${(x - minX).toFixed(2)} ${(t.maxH - h).toFixed(2)}`).join(" ");
-    svg += `<g transform="translate(${xO},25)"><text x="${w / 2}" y="-6" text-anchor="middle" font-family="monospace" font-size="6" fill="${t.c}">${t.label}</text><polygon points="${pts}" fill="none" stroke="${t.c}" stroke-width="0.5"/><path d="${wPath}" fill="none" stroke="${t.c}" stroke-width="1.5"/></g>\n`;
+    toolOffsets.push({ xO, minX, w });
+    svg += `<text x="${xO + w / 2}" y="19" text-anchor="middle" font-family="monospace" font-size="6">${t.label}</text>\n`;
     xO += w + 30;
   });
+  svg += `</g>\n`;
+
+  // Cut layer — closed polygon outlines only, red hairline stroke
+  svg += `<g id="cut" fill="none" stroke="${CUT}" stroke-width="${HAIRLINE}">\n`;
+  tools.forEach((t, idx) => {
+    const { xO: ox, minX } = toolOffsets[idx];
+    const px = (x, h) => `${(x - minX).toFixed(2)},${(t.maxH - h).toFixed(2)}`;
+    const pts = [...t.back.map(([x,h])=>px(x,h)), ...[...t.work].reverse().map(([x,h])=>px(x,h)), ...(t.stepR||[]).map(([x,h])=>px(x,h))].join(" ");
+    svg += `<polygon points="${pts}" transform="translate(${ox},25)"/>\n`;
+  });
+  svg += `</g>\n`;
+
   svg += "</svg>";
   return svg;
 }
@@ -430,7 +451,7 @@ export function generateTemplateSVG(bowls, p, edgeAngle, ribThick) {
   const mh = Math.max(...tools.map(t => t.maxH));
   const scale = Math.min((pageH - margin * 2 - 30) / mh, 1);
 
-  let svg = `<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${pageW} ${pageH}" width="${pageW}mm" height="${pageH}mm">\n`;
+  let svg = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 ${pageW} ${pageH}" width="${pageW}mm" height="${pageH}mm">\n`;
   svg += `<rect x="${margin}" y="${margin}" width="${pageW - margin * 2}" height="${pageH - margin * 2}" fill="none" stroke="#ccc" stroke-width="0.3" stroke-dasharray="4,2"/>\n`;
   [[margin, margin], [pageW - margin, margin], [margin, pageH - margin], [pageW - margin, pageH - margin]].forEach(([x, y]) => {
     svg += `<line x1="${x - 5}" y1="${y}" x2="${x + 5}" y2="${y}" stroke="#999" stroke-width="0.3"/>\n`;

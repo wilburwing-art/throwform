@@ -603,7 +603,7 @@ function RibToolView({ bowls, p, edgeAngle, ribThick, profileName, imperial }) {
 }
 
 function exportSVG(bowls, p, edgeAngle, ribThick) {
-  const svg = generateRibSVG(bowls, p, edgeAngle, ribThick, { inner: P.inner, outer: P.textMuted });
+  const svg = generateRibSVG(bowls, p, edgeAngle, ribThick);
   const blob = new Blob([svg], { type: "image/svg+xml" }); const url = URL.createObjectURL(blob);
   const a = document.createElement("a"); a.href = url; a.download = `ribs-inner-outer-${edgeAngle}deg.svg`; a.click(); URL.revokeObjectURL(url);
 }
