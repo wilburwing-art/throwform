@@ -1231,6 +1231,7 @@ export default function App() {
       <div style={{ background: P.card, borderBottom: `1px solid ${P.cardBorder}`, padding: "0 12px", display: "flex", alignItems: "center", position: "sticky", top: 0, zIndex: 10, boxShadow: "0 1px 8px rgba(61,50,41,0.06)", overflowX: "auto", gap: 2 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 8, padding: "14px 12px 14px 0", borderRight: `1px solid ${P.cardBorder}`, marginRight: 4, flexShrink: 0 }}>
           <span style={{ fontFamily: serif, fontSize: 18, fontWeight: 700, color: P.text }}>ThrowForm</span>
+          <span style={{ fontFamily: mono, fontSize: 9, color: P.textFaint, letterSpacing: "0.03em" }}>pottery profile rib generator</span>
         </div>
         {tabs.map(t => (<button key={t.id} onClick={() => setTab(t.id)} style={{ padding: "14px 10px", background: "transparent", border: "none", cursor: "pointer", borderBottom: tab === t.id ? `2px solid ${P.accent}` : "2px solid transparent", display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
           <span style={{ fontSize: 12 }}>{t.icon}</span><span style={{ fontFamily: mono, fontSize: 10, fontWeight: 500, letterSpacing: "0.04em", color: tab === t.id ? P.accent : P.textFaint }}>{t.label}</span>
