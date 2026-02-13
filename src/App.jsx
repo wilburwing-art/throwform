@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { VESSEL, PROFILES, computeVolumes, RIM_TYPES, rimGeometry, genInner, nest, generateRibSVG, generateTemplateSVG, generateProfileJSON } from "./geometry.js";
+import { VESSEL, PROFILES, computeVolumes, RIM_TYPES, rimGeometry, genInner, nest, generateRibPolygon, generateRibSVG, generateTemplateSVG, generateRibDXF, generateProfileJSON } from "./geometry.js";
 
 const mono = "'IBM Plex Mono', 'Menlo', monospace";
 const serif = "'Fraunces', 'Georgia', serif";
@@ -382,78 +382,29 @@ function CrossSection({ p, bowls, showNesting, showAnnotations, rimType, selecte
 // Right edge = outer wall curve (real radii), Left edge = inner wall curve
 // Rib IS the bowl wall cross-section — fits like a puzzle piece
 // ═══════════════════════════════════════════════════════════
-function RibToolView({ bowls, p, edgeAngle, ribThick, profileName, imperial }) {
-  const edgeExt = ribThick / (2 * Math.tan((edgeAngle / 2) * Math.PI / 180));
+function RibToolView({ bowls, p, ribGap, profileName, imperial }) {
   const sc = 2.0;
   const mm2in = v => (v / 25.4).toFixed(2) + '"';
   const fmt = v => imperial ? mm2in(v) : v.toFixed(1) + 'mm';
   const fmtI = v => imperial ? mm2in(v) : v.toFixed(0) + 'mm';
 
-  // Two ribs per bowl: INNER (shapes inside) + OUTER (shapes outside)
-  const tools = [];
-  bowls.forEach((b, i) => {
-    const wt = p.wallThickness * b.s;
-    const stepH = b.footH + b.floorT;
-    const innerWall = b.outer.map(([r, h]) => [r, h]);
-    const outerWall = b.outer.map(([r, h]) => [r + wt, h]);
-    const wallH = Math.max(...innerWall.map(q => q[1]));
-    const innerBaseR = innerWall[0][0];
-    const outerBaseR = outerWall[0][0];
-    const maxSweep = Math.max(
-      ...innerWall.map(q => q[0] - innerBaseR),
-      ...outerWall.map(q => q[0] - outerBaseR),
-    ) || 1;
-    const sweepScale = (ribThick * 0.75) / maxSweep;
-    const maxH = wallH + stepH;
-
-    // ── INNER RIB: right edge = inner wall curve, left edge = straight ──
-    {
-      const workEdge = innerWall.map(([r, h]) => [ribThick + (r - innerBaseR) * sweepScale, h + stepH]);
-      const backEdge = [[0, 0], [0, maxH]]; // straight left side, full height
-      const workTaper = workEdge.map(([x, h]) => [x + edgeExt, h]);
-      const backTaper = backEdge.map(([x, h]) => [x - edgeExt, h]);
-      const allXs = [...workTaper.map(q => q[0]), ...backTaper.map(q => q[0])];
-      const minX = Math.min(...allXs), maxX = Math.max(...allXs);
-      tools.push({
-        label: `B${i + 1} INNER`, sublabel: fmtI(b.rim),
-        color: P.inner, bowlColor: C[i % 6],
-        workEdge, backEdge, workTaper, backTaper,
-        maxH, w: maxX - minX + 8, minX, rimDia: b.rim,
-        wallH, wt, stepH, side: "inner",
-      });
-    }
-
-    // ── OUTER RIB: right edge = outer wall curve + step, left edge = straight ──
-    {
-      const workStraight = [[ribThick, 0], [ribThick, stepH]];
-      const workCurve = outerWall.map(([r, h]) => [ribThick + (r - outerBaseR) * sweepScale, h + stepH]);
-      const workEdge = [...workStraight, ...workCurve];
-      const backEdge = [[0, 0], [0, maxH]]; // straight left side, full height
-      const workTaper = workEdge.map(([x, h]) => [x + edgeExt, h]);
-      const backTaper = backEdge.map(([x, h]) => [x - edgeExt, h]);
-      const allXs = [...workTaper.map(q => q[0]), ...backTaper.map(q => q[0])];
-      const minX = Math.min(...allXs), maxX = Math.max(...allXs);
-      tools.push({
-        label: `B${i + 1} OUTER`, sublabel: fmtI(b.rim),
-        color: P.textMuted, bowlColor: C[i % 6],
-        workEdge, backEdge, workTaper, backTaper,
-        maxH, w: maxX - minX + 8, minX, rimDia: b.rim,
-        wallH, wt, stepH, side: "outer",
-      });
-    }
+  // One combined rib per bowl
+  const ribs = bowls.map((b, i) => {
+    const poly = generateRibPolygon(b, p, ribGap);
+    return {
+      label: `B${i + 1}`, sublabel: fmtI(b.rim),
+      bowlColor: C[i % 6], poly,
+      wallH: poly.wallH, stepH: poly.stepH, gap: poly.gap,
+    };
   });
 
-  // Layout — add right margin for measurements
+  // Layout
   const measW = 52;
-  const gap = 20 + measW;
+  const spacing = 20 + measW;
   let totalW = 25;
-  tools.forEach(t => { totalW += t.w * sc + gap; });
-  const globalMaxH = Math.max(...tools.map(t => t.maxH));
+  ribs.forEach(r => { totalW += r.poly.width * sc + spacing; });
+  const globalMaxH = Math.max(...ribs.map(r => r.poly.height));
   const svgH = globalMaxH * sc + 65;
-
-  // [x, h] → SVG "x,y" (h=0 at bottom, flipped)
-  const toSVG = (pts, xOff, minX, mH) =>
-    pts.map(([x, h]) => `${((x - minX + 6) * sc + xOff).toFixed(1)},${((mH - h) * sc + 26).toFixed(1)}`);
 
   // Grid
   const gridStep = 10 * sc;
@@ -461,7 +412,6 @@ function RibToolView({ bowls, p, edgeAngle, ribThick, profileName, imperial }) {
 
   return (
     <svg viewBox={`0 0 ${Math.max(totalW, 200)} ${svgH}`} style={{ width: "100%", background: P.svgBg, borderRadius: 8 }}>
-      {/* GRID */}
       <defs>
         <pattern id="ribgrid" width={gridStep} height={gridStep} patternUnits="userSpaceOnUse">
           <path d={`M ${gridStep} 0 L 0 0 0 ${gridStep}`} fill="none" stroke={P.grid} strokeWidth={0.3} />
@@ -469,7 +419,7 @@ function RibToolView({ bowls, p, edgeAngle, ribThick, profileName, imperial }) {
       </defs>
       <rect x={0} y={0} width={Math.max(totalW, 200)} height={svgH} fill="url(#ribgrid)" />
 
-      {/* Grid legend — bottom right */}
+      {/* Grid legend */}
       <g transform={`translate(${Math.max(totalW, 200) - 28},${svgH - 26})`}>
         <rect x={0} y={0} width={gridStep} height={gridStep} fill={P.grid + "44"} stroke={P.textFaint} strokeWidth={0.5} />
         <text x={gridStep / 2} y={gridStep + 8} textAnchor="middle" fontSize="4" fill={P.textFaint} fontFamily={mono}>{gridLabel}</text>
@@ -477,123 +427,108 @@ function RibToolView({ bowls, p, edgeAngle, ribThick, profileName, imperial }) {
 
       {(() => {
         let xOff = 20;
-        return tools.map((t, ti) => {
+        return ribs.map((r, ri) => {
           const x0 = xOff;
-          xOff += t.w * sc + gap;
-          const sv = (pts) => toSVG(pts, x0, t.minX, globalMaxH);
+          xOff += r.poly.width * sc + spacing;
+          const poly = r.poly;
 
-          const wTaper = sv(t.workTaper);  // right side (curved working edge)
-          const bTaper = sv(t.backTaper);  // left side (straight back)
+          // Convert polygon point to SVG coords
+          const toSvg = ([px, py]) => [
+            (px - poly.minX + 4) * sc + x0,
+            (globalMaxH - py) * sc + 26,
+          ];
 
-          // Outline: back bottom → work bottom → work up to rim → back rim down → close
-          // For inner rib: work edge starts at stepH, so add step on right
-          // For outer rib: work edge includes step already (starts at h=0)
-          let outlinePts;
-          if (t.side === "inner") {
-            // Right side has step: base → step up → curve
-            const stepRightSvg = sv([[ribThick + edgeExt, 0]])[0]; // right at table level
-            outlinePts = [
-              ...bTaper,                    // left: bottom → top
-              ...wTaper.slice().reverse(),  // right: rim → floor (stepH)
-              stepRightSvg,                 // step down to table
-            ].join(" ");
-          } else {
-            // Outer: work edge goes all the way to h=0
-            outlinePts = [
-              ...bTaper,                    // left: bottom → top
-              ...wTaper.slice().reverse(),  // right: rim → step → table
-            ].join(" ");
-          }
+          // Build outline path
+          const outlinePts = poly.points.map(pt => toSvg(pt).map(v => v.toFixed(1)).join(",")).join(" ");
 
           // Reference points
-          const botL = bTaper[0].split(",").map(Number);
-          const botR = wTaper[0].split(",").map(Number);
-          const topL = bTaper[bTaper.length - 1].split(",").map(Number);
-          const topR = wTaper[wTaper.length - 1].split(",").map(Number);
-          const baseY = Math.max(botL[1], botR[1]);
-          const cX = (topL[0] + topR[0]) / 2;
+          const [blX, blY] = toSvg([poly.minX, 0]); // bottom-left area
+          const [brX, brY] = toSvg([poly.gap, 0]); // bottom-right area
+          const baseY = Math.max(blY, brY);
 
-          // Thumb hole
-          const wEdge = sv(t.workEdge);
-          const upperIdx = Math.floor(wEdge.length * 0.6);
-          const wM = wEdge[Math.min(upperIdx, wEdge.length - 1)].split(",").map(Number);
-          const hCx = (topL[0] + wM[0]) / 2;
-          const hCy = wM[1];
-          const hR = Math.min(Math.abs(wM[0] - topL[0]) * 0.15, 6);
+          // Find rim points (top of left & right edges)
+          const leftRimPt = toSvg([0, poly.stepH + poly.wallH]);
+          const rightRimPt = toSvg([poly.gap, poly.stepH + poly.wallH]);
+          const cX = (leftRimPt[0] + rightRimPt[0]) / 2;
 
-          // Height references
+          // Hanging hole
+          const [hcx, hcy] = toSvg([poly.hole.cx, poly.hole.cy]);
+          const holeR = poly.hole.r * sc;
+
+          // Height dimension positions
           const hToY = h => (globalMaxH - h) * sc + 26;
-          const rimY = hToY(t.maxH);
-          const floorY = hToY(t.stepH);
+          const rimY = hToY(poly.stepH + poly.wallH);
+          const floorY = hToY(poly.stepH);
           const tableY = hToY(0);
-          const mx = Math.max(botR[0], topR[0]) + 8;
+          const mx = Math.max(brX, rightRimPt[0]) + 8;
 
           return (
-            <g key={ti}>
+            <g key={ri}>
               {/* Title */}
-              <text x={cX} y={10} textAnchor="middle" fontSize="6.5" fill={t.color} fontFamily={mono} fontWeight="700">{t.label}</text>
-              <text x={cX} y={19} textAnchor="middle" fontSize="5" fill={t.bowlColor} fontFamily={mono}>{t.sublabel}</text>
+              <text x={cX} y={10} textAnchor="middle" fontSize="6.5" fill={P.accent} fontFamily={mono} fontWeight="700">{r.label}</text>
+              <text x={cX} y={19} textAnchor="middle" fontSize="5" fill={r.bowlColor} fontFamily={mono}>{r.sublabel}</text>
 
-              {/* Rib outline */}
-              <polygon points={outlinePts} fill={t.color + "08"} stroke={t.color} strokeWidth={1.2} strokeLinejoin="round" />
+              {/* Rib outline — inner edge green, outer edge gray */}
+              <polygon points={outlinePts} fill={P.accent + "08"} stroke={P.accent} strokeWidth={1.2} strokeLinejoin="round" />
 
-              {/* Highlight flat base */}
+              {/* Highlight inner edge (left side, above step) */}
               {(() => {
-                const baseRightX = t.side === "inner"
-                  ? sv([[ribThick + edgeExt, 0]])[0].split(",").map(Number)[0]
-                  : botR[0];
-                return (<>
-                  <line x1={botL[0]} y1={baseY} x2={baseRightX} y2={baseY}
-                    stroke={P.rim} strokeWidth={2.5} strokeLinecap="round" />
-                  <text x={(botL[0] + baseRightX) / 2} y={baseY + 11} textAnchor="middle" fontSize="4" fill={P.rim} fontFamily={mono} fontWeight="600">
-                    FLAT · wheel true
-                  </text>
-                </>);
+                const innerPts = [];
+                const innerWall = bowls[ri].inner;
+                const innerBaseR = innerWall[0][0];
+                for (let i = innerWall.length - 1; i >= 0; i--) {
+                  const sweep = innerWall[i][0] - innerBaseR;
+                  innerPts.push(toSvg([-sweep, poly.stepH + innerWall[i][1]]));
+                }
+                if (innerPts.length < 2) return null;
+                const d = innerPts.map((pt, j) => `${j === 0 ? 'M' : 'L'}${pt[0].toFixed(1)},${pt[1].toFixed(1)}`).join(' ');
+                return <path d={d} fill="none" stroke={P.inner} strokeWidth={1.8} strokeLinecap="round" />;
               })()}
 
-              {/* Step annotation for outer rib */}
-              {t.side === "outer" && (() => {
-                const workAtFloor = wTaper[2] ? wTaper[2].split(",").map(Number) : botR;
-                return (<g>
-                  <line x1={botR[0]} y1={workAtFloor[1]} x2={botR[0]} y2={baseY}
-                    stroke={P.textMuted} strokeWidth={0.7} strokeDasharray="2,2" />
-                  <text x={botR[0] + 3} y={(workAtFloor[1] + baseY) / 2 + 2} textAnchor="start"
-                    fontSize="3.5" fill={P.textFaint} fontFamily={mono}>step</text>
-                </g>);
+              {/* Highlight outer edge (right side, above step) */}
+              {(() => {
+                const outerPts = [];
+                const outerWall = bowls[ri].outer;
+                const outerBaseR = outerWall[0][0];
+                for (let i = 0; i < outerWall.length; i++) {
+                  const sweep = outerWall[i][0] - outerBaseR;
+                  outerPts.push(toSvg([poly.gap + sweep, poly.stepH + outerWall[i][1]]));
+                }
+                if (outerPts.length < 2) return null;
+                const d = outerPts.map((pt, j) => `${j === 0 ? 'M' : 'L'}${pt[0].toFixed(1)},${pt[1].toFixed(1)}`).join(' ');
+                return <path d={d} fill="none" stroke={P.textMuted} strokeWidth={1.8} strokeLinecap="round" />;
               })()}
 
-              {/* Step annotation for inner rib */}
-              {t.side === "inner" && (() => {
-                const workBase = wTaper[0].split(",").map(Number);
-                const stepRPt = sv([[ribThick + edgeExt, 0]])[0].split(",").map(Number);
-                return (<g>
-                  <line x1={stepRPt[0]} y1={workBase[1]} x2={stepRPt[0]} y2={baseY}
-                    stroke={P.textMuted} strokeWidth={0.7} strokeDasharray="2,2" />
-                  <text x={stepRPt[0] + 3} y={(workBase[1] + baseY) / 2 + 2} textAnchor="start"
-                    fontSize="3.5" fill={P.textFaint} fontFamily={mono}>step</text>
-                </g>);
-              })()}
+              {/* Flat base highlight */}
+              <line x1={blX} y1={baseY} x2={brX} y2={baseY}
+                stroke={P.rim} strokeWidth={2.5} strokeLinecap="round" />
+              <text x={(blX + brX) / 2} y={baseY + 11} textAnchor="middle" fontSize="4" fill={P.rim} fontFamily={mono} fontWeight="600">
+                FLAT · wheel true
+              </text>
 
-              {/* Thumb hole */}
-              {hR > 2 && <circle cx={hCx} cy={hCy} r={hR} fill={P.svgBg} stroke={t.color + "44"} strokeWidth={0.7} />}
+              {/* Hanging hole */}
+              {holeR > 2 && <circle cx={hcx} cy={hcy} r={holeR} fill={P.svgBg} stroke={P.accent + "44"} strokeWidth={0.7} />}
 
               {/* Edge labels */}
-              <text x={topL[0] - 2} y={topL[1] - 3} textAnchor="end" fontSize="4" fill={P.textFaint} fontFamily={mono}>back</text>
-              <text x={topR[0] + 2} y={topR[1] - 3} textAnchor="start" fontSize="4.5" fill={t.color} fontFamily={mono} fontWeight="600">
-                {t.side === "inner" ? "INNER" : "OUTER"}
-              </text>
-              <text x={cX} y={Math.min(topL[1], topR[1]) - 7} textAnchor="middle" fontSize="4" fill={P.textFaint} fontFamily={mono}>▲ rim</text>
+              <text x={leftRimPt[0] - 2} y={leftRimPt[1] - 3} textAnchor="end" fontSize="4" fill={P.inner} fontFamily={mono} fontWeight="600">INNER</text>
+              <text x={rightRimPt[0] + 2} y={rightRimPt[1] - 3} textAnchor="start" fontSize="4" fill={P.textMuted} fontFamily={mono} fontWeight="600">OUTER</text>
+              <text x={cX} y={Math.min(leftRimPt[1], rightRimPt[1]) - 7} textAnchor="middle" fontSize="4" fill={P.textFaint} fontFamily={mono}>▲ rim</text>
 
-              {/* Wall height */}
-              <line x1={mx} y1={rimY} x2={mx} y2={floorY} stroke={t.color + "44"} strokeWidth={0.5} />
-              <line x1={mx - 2} y1={rimY} x2={mx + 2} y2={rimY} stroke={t.color + "44"} strokeWidth={0.5} />
-              <line x1={mx - 2} y1={floorY} x2={mx + 2} y2={floorY} stroke={t.color + "44"} strokeWidth={0.5} />
-              <text x={mx + 4} y={(rimY + floorY) / 2 + 2} fontSize="3.8" fill={t.color} fontFamily={mono}>{fmtI(t.wallH)} wall</text>
+              {/* Gap annotation */}
+              <text x={cX} y={(floorY + tableY) / 2 + 2} textAnchor="middle" fontSize="3.5" fill={P.textFaint} fontFamily={mono}>
+                {fmtI(r.gap)} gap
+              </text>
+
+              {/* Wall height dimension */}
+              <line x1={mx} y1={rimY} x2={mx} y2={floorY} stroke={P.accent + "44"} strokeWidth={0.5} />
+              <line x1={mx - 2} y1={rimY} x2={mx + 2} y2={rimY} stroke={P.accent + "44"} strokeWidth={0.5} />
+              <line x1={mx - 2} y1={floorY} x2={mx + 2} y2={floorY} stroke={P.accent + "44"} strokeWidth={0.5} />
+              <text x={mx + 4} y={(rimY + floorY) / 2 + 2} fontSize="3.8" fill={P.accent} fontFamily={mono}>{fmtI(r.wallH)} wall</text>
 
               {/* Step height */}
               <line x1={mx} y1={floorY} x2={mx} y2={tableY} stroke={`${P.purple}44`} strokeWidth={0.5} />
               <line x1={mx - 2} y1={tableY} x2={mx + 2} y2={tableY} stroke={`${P.purple}44`} strokeWidth={0.5} />
-              <text x={mx + 4} y={(floorY + tableY) / 2 + 2} fontSize="3.5" fill={P.purple} fontFamily={mono}>{fmt(t.stepH)} step</text>
+              <text x={mx + 4} y={(floorY + tableY) / 2 + 2} fontSize="3.5" fill={P.purple} fontFamily={mono}>{fmt(r.stepH)} step</text>
             </g>
           );
         });
@@ -602,14 +537,20 @@ function RibToolView({ bowls, p, edgeAngle, ribThick, profileName, imperial }) {
   );
 }
 
-function exportSVG(bowls, p, edgeAngle, ribThick) {
-  const svg = generateRibSVG(bowls, p, edgeAngle, ribThick);
+function exportSVG(bowls, p, ribGap) {
+  const svg = generateRibSVG(bowls, p, ribGap);
   const blob = new Blob([svg], { type: "image/svg+xml" }); const url = URL.createObjectURL(blob);
-  const a = document.createElement("a"); a.href = url; a.download = `ribs-inner-outer-${edgeAngle}deg.svg`; a.click(); URL.revokeObjectURL(url);
+  const a = document.createElement("a"); a.href = url; a.download = `ribs-laser-${ribGap.toFixed(0)}mm-gap.svg`; a.click(); URL.revokeObjectURL(url);
 }
 
-function exportTemplate(bowls, p, edgeAngle, ribThick) {
-  const svg = generateTemplateSVG(bowls, p, edgeAngle, ribThick);
+function exportDXF(bowls, p, ribGap) {
+  const dxf = generateRibDXF(bowls, p, ribGap);
+  const blob = new Blob([dxf], { type: "application/dxf" }); const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = `ribs-laser-${ribGap.toFixed(0)}mm-gap.dxf`; a.click(); URL.revokeObjectURL(url);
+}
+
+function exportTemplate(bowls, p, ribGap) {
+  const svg = generateTemplateSVG(bowls, p, ribGap);
   const blob = new Blob([svg], { type: "image/svg+xml" }); const url = URL.createObjectURL(blob);
   const a = document.createElement("a"); a.href = url; a.download = `throwform-template-handcut.svg`; a.click(); URL.revokeObjectURL(url);
 }
@@ -1164,8 +1105,7 @@ export default function App() {
   // Update global palette on dark mode toggle
   P = dark ? PD : PL;
   
-  const [edgeAngle, setEdgeAngle] = useState(60);
-  const [ribThick, setRibThick] = useState(8);
+  const [ribGap, setRibGap] = useState(50.8);
   const [rimType, setRimType] = useState("rounded");
   const [shrinkage, setShrinkage] = useState(12); // clay shrinkage % (fired vs wet)
   const [mfg, setMfg] = useState("hand");
@@ -1342,8 +1282,8 @@ export default function App() {
                   <span style={{ fontFamily: mono, fontSize: 10, color: P.textMuted }}>Rib tools</span>
                 </label>
                 <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
-                  <span style={{ fontFamily: mono, fontSize: 10, color: P.textMuted, whiteSpace: "nowrap" }}>Rib {mm(ribThick)}</span>
-                  <input type="range" min={4} max={14} step={0.5} value={ribThick} onChange={e => setRibThick(parseFloat(e.target.value))} style={{ width: 60, accentColor: P.accent }} />
+                  <span style={{ fontFamily: mono, fontSize: 10, color: P.textMuted, whiteSpace: "nowrap" }}>Gap {mm(ribGap)}</span>
+                  <input type="range" min={30} max={80} step={1} value={ribGap} onChange={e => setRibGap(parseFloat(e.target.value))} style={{ width: 60, accentColor: P.accent }} />
                 </label>
                 <div style={{ width: 1, height: 18, background: P.cardBorder }} />
                 <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
@@ -1399,11 +1339,11 @@ export default function App() {
               </Card>
 
               {showRibs && (
-                <Card title="RIB TOOLS — TWO PER BOWL" color={P.accent} glow>
+                <Card title="RIB TOOLS — ONE PER BOWL" color={P.accent} glow>
                   <div style={{ fontFamily: mono, fontSize: 9, color: P.textFaint, marginBottom: 8 }}>
-                    Inner + outer wall profile ribs · flat base = wheel true · {mm(ribThick)} body
+                    Combined inner + outer wall profile · flat base = wheel true · {mm(ribGap)} gap
                   </div>
-                  <RibToolView bowls={bowls} p={p} edgeAngle={edgeAngle} ribThick={ribThick} profileName={p.name} imperial={imperial} />
+                  <RibToolView bowls={bowls} p={p} ribGap={ribGap} profileName={p.name} imperial={imperial} />
                 </Card>
               )}
 
@@ -1419,7 +1359,7 @@ export default function App() {
                   <Stat l="Depth" v={f(p.interiorDepth)} c={P.inner} />
                   <Stat l="Foot ø" v={f(footOR * 2)} c={P.purple} />
                   <Stat l="Wall" v={mm(wallT)} c={P.textMuted} />
-                  <Stat l="Edge" v={`${edgeAngle}°`} c={P.accent} />
+                  <Stat l="Gap" v={mm(ribGap)} c={P.accent} />
                 </>); })()}
               </div>
               <Card title="NESTING TABLE">
@@ -1440,8 +1380,8 @@ export default function App() {
                 </table></div>
               </Card>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                <Btn full onClick={() => exportSVG(bowls, p, edgeAngle, ribThick)}>↓ RIB SVG (3D PRINT / CNC)</Btn>
-                <Btn full onClick={() => exportTemplate(bowls, p, edgeAngle, ribThick)} color={P.inner}>↓ TEMPLATE (HAND CUT)</Btn>
+                <Btn full onClick={() => exportSVG(bowls, p, ribGap)}>↓ RIB SVG (LASER CUT)</Btn>
+                <Btn full onClick={() => exportDXF(bowls, p, ribGap)} color={P.inner}>↓ RIB DXF (LASER CUT)</Btn>
                 <Btn full onClick={() => exportProfile(p, p.name)} color={P.blue}>↓ PROFILE JSON</Btn>
               </div>
             </div>
@@ -1463,8 +1403,8 @@ export default function App() {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
             <Card title="SPECS"><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 5 }}>
               <Stat l="Wall" v={mm(wallT)} /><Stat l="Floor" v={mm(floorT)} /><Stat l="Foot H" v={mm(footH)} c={P.purple} />
-              <Stat l="Foot ø" v={mmI(footOR * 2)} c={P.purple} /><Stat l="Rim" v={RIM_TYPES[rimType]?.name} c={P.accent} /><Stat l="Edge" v={edgeAngle + "°"} c={P.accent} />
-              <Stat l="Rib" v={mm(ribThick)} /><Stat l="Profile" v={p.name.split(" ")[0]} /><Stat l="Source" v={isCustom ? "Custom" : "Data"} c={P.inner} />
+              <Stat l="Foot ø" v={mmI(footOR * 2)} c={P.purple} /><Stat l="Rim" v={RIM_TYPES[rimType]?.name} c={P.accent} /><Stat l="Gap" v={mm(ribGap)} c={P.accent} />
+              <Stat l="Profile" v={p.name.split(" ")[0]} /><Stat l="Source" v={isCustom ? "Custom" : "Data"} c={P.inner} />
             </div></Card>
             <Card title="CROSS-SECTION"><CrossSection p={p} bowls={bowls} showNesting={true} showAnnotations={false} rimType={rimType} /></Card>
           </div>
@@ -1504,8 +1444,8 @@ export default function App() {
             </Card>
           )}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginTop: 10 }}>
-            <Btn full onClick={() => exportSVG(bowls, p, edgeAngle, ribThick)}>↓ RIB SVG</Btn>
-            <Btn full onClick={() => exportTemplate(bowls, p, edgeAngle, ribThick)} color={P.inner}>↓ TEMPLATE</Btn>
+            <Btn full onClick={() => exportSVG(bowls, p, ribGap)}>↓ RIB SVG</Btn>
+            <Btn full onClick={() => exportDXF(bowls, p, ribGap)} color={P.inner}>↓ RIB DXF</Btn>
             <Btn full onClick={() => exportProfile(p, p.name)} color={P.blue}>↓ PROFILE JSON</Btn>
           </div>
         </div>)}
@@ -1525,7 +1465,7 @@ export default function App() {
               <div style={{ fontFamily: mono, fontSize: 10, lineHeight: 1.8, color: P.textMuted }}>
                 <div style={{ marginBottom: 8 }}>
                   <span style={{ color: P.accent, fontWeight: 700 }}>MATERIAL:</span> Formlabs Rigid 4000 Resin (SLA)
-                  <div style={{ fontSize: 9, color: P.textFaint, marginLeft: 16 }}>Glass-filled · PEEK-like stiffness · Polished finish · Holds {edgeAngle}° edge · Won't deform under clay pressure</div>
+                  <div style={{ fontSize: 9, color: P.textFaint, marginLeft: 16 }}>Glass-filled · PEEK-like stiffness · Polished finish · Won't deform under clay pressure</div>
                 </div>
                 {[
                   { name: "Xometry", note: "Free US shipping · Instant quoting · Rigid 4000 · 1-5 day lead" },
@@ -1540,7 +1480,7 @@ export default function App() {
                   </div>
                 ))}
                 <div style={{ marginTop: 10, padding: "8px 10px", background: P.bgDeep, borderRadius: 6, fontSize: 9, color: P.textMuted }}>
-                  <span style={{ color: P.accent }}>PROTOTYPE:</span> Export RIB SVG → extrude to {mm(ribThick)} in Fusion 360 → add {edgeAngle}° chamfer on working edge → export STL → upload. Request "Formlabs Rigid 4000" or "SLA engineering resin" at 50µm layers.
+                  <span style={{ color: P.accent }}>PROTOTYPE:</span> Export RIB SVG → import into Fusion 360 → extrude to 3mm beech wood thickness → export STL → upload. Request "Formlabs Rigid 4000" or "SLA engineering resin" at 50µm layers.
                 </div>
               </div>
             </Card>
@@ -1571,7 +1511,7 @@ export default function App() {
               { k: "social", icon: "📱", t: "CONTENT", d: "30-day TikTok plan", c: P.accent, fn: () => runA("social", "Social media for pottery niche. No markdown.", "30-day TikTok/IG plan for nesting bowl rib set. SLC pottery workshop.") },
               { k: "launch", icon: "🚀", t: "LAUNCH", d: "90-day roadmap", c: P.inner, fn: () => runA("launch", "Amazon launch strategist. No markdown.", "90-day plan to $1K for " + nB + "-piece rib set at $" + price + ". SLC, woodworking tools + 3D print. $500 budget.") },
               { k: "vendor", icon: "📧", t: "VENDOR AUTO", d: "PO email automation", c: P.purple, fn: () => runA("vendor", "Ops automation expert. No markdown.", "Vendor management for pottery rib business. Auto PO emails, fulfillment routing. Use Xometry, Hubs, JLC3DP, Shapeways. Material: Formlabs Rigid 4000 SLA resin.") },
-              { k: "feedback", icon: "🔄", t: "REVIEW→DESIGN", d: "Reviews → design updates", c: P.accent, fn: () => runA("feedback", "Product design engineer. No markdown.", "Review-to-design loop for pottery ribs. Parse reviews, map to params (wall=" + wallT + "mm, floor=" + floorT + "mm, foot_h=" + footH + "mm, foot_r=" + footOR + "mm, edge_angle=" + edgeAngle + "°, rib_thick=" + ribThick + "mm, rim_type=" + rimType + "). Scoring system.") },
+              { k: "feedback", icon: "🔄", t: "REVIEW→DESIGN", d: "Reviews → design updates", c: P.accent, fn: () => runA("feedback", "Product design engineer. No markdown.", "Review-to-design loop for pottery ribs. Parse reviews, map to params (wall=" + wallT + "mm, floor=" + floorT + "mm, foot_h=" + footH + "mm, foot_r=" + footOR + "mm, rib_gap=" + ribGap + "mm, rim_type=" + rimType + "). Scoring system.") },
             ].map(a => <button key={a.k} onClick={a.fn} style={{ background: P.card, border: `1px solid ${ag[a.k].s === "done" ? a.c + "55" : P.cardBorder}`, borderRadius: 8, padding: "12px", cursor: "pointer", textAlign: "left", position: "relative", overflow: "hidden" }}>
               {ag[a.k].s === "done" && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: a.c }} />}
               <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 4 }}><span style={{ fontSize: 14 }}>{a.icon}</span><span style={{ fontFamily: mono, fontSize: 10, fontWeight: 700, color: P.text }}>{a.t}</span></div>
