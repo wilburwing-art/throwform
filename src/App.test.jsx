@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { render } from "@testing-library/react";
+import { render, fireEvent, act } from "@testing-library/react";
 import App from "./App.jsx";
 
 // Helper: render App and return the container
@@ -118,5 +118,71 @@ describe("Bowl nesting selector", () => {
     expect(allBtn).not.toBeNull();
     const b1 = buttons.find(b => b.textContent.trim() === "B1");
     expect(b1).not.toBeNull();
+  });
+});
+
+describe("Profile switching", () => {
+  it("does not crash when switching to each profile", () => {
+    const { container } = render(<App />);
+    const profileNames = ["Mug", "Cappuccino", "Ramen", "Cereal", "Pasta", "Salad", "Planter", "Custom"];
+    for (const name of profileNames) {
+      const buttons = Array.from(container.querySelectorAll("button"));
+      const btn = buttons.find(b => b.textContent.includes(name));
+      if (btn) {
+        act(() => { fireEvent.click(btn); });
+        const svgs = container.querySelectorAll("svg");
+        expect(svgs.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("does not crash when selecting individual bowls", () => {
+    const { container } = render(<App />);
+    const buttons = Array.from(container.querySelectorAll("button"));
+    for (const label of ["B1", "B2", "B3"]) {
+      const btn = buttons.find(b => b.textContent.trim() === label);
+      if (btn) {
+        act(() => { fireEvent.click(btn); });
+        const svgs = container.querySelectorAll("svg");
+        expect(svgs.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("does not crash switching between all profile pairs", () => {
+    const { container } = render(<App />);
+    const profileNames = ["Färgklar", "Mug", "Cappuccino", "Ramen", "Cereal", "Pasta", "Salad", "Planter"];
+    // Switch in each direction
+    for (let i = 0; i < profileNames.length; i++) {
+      for (let j = 0; j < profileNames.length; j++) {
+        if (i === j) continue;
+        const buttons1 = Array.from(container.querySelectorAll("button"));
+        const btn1 = buttons1.find(b => b.textContent.includes(profileNames[i]));
+        if (btn1) act(() => { fireEvent.click(btn1); });
+        const buttons2 = Array.from(container.querySelectorAll("button"));
+        const btn2 = buttons2.find(b => b.textContent.includes(profileNames[j]));
+        if (btn2) act(() => { fireEvent.click(btn2); });
+        // Should still have SVGs and evenodd paths
+        const paths = container.querySelectorAll('path[fill-rule="evenodd"]');
+        expect(paths.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("SVG paths have no NaN values after profile switch", () => {
+    const { container } = render(<App />);
+    const profileNames = ["Mug", "Ramen", "Pasta", "Planter"];
+    for (const name of profileNames) {
+      const buttons = Array.from(container.querySelectorAll("button"));
+      const btn = buttons.find(b => b.textContent.includes(name));
+      if (btn) {
+        act(() => { fireEvent.click(btn); });
+        const allPaths = container.querySelectorAll("path");
+        for (const path of allPaths) {
+          const d = path.getAttribute("d");
+          if (d) expect(d).not.toContain("NaN");
+        }
+      }
+    }
   });
 });

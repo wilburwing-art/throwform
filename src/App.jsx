@@ -1,5 +1,18 @@
-import { useState, useEffect, useRef } from "react";
-import { VESSEL, PROFILES, computeVolumes, RIM_TYPES, rimGeometry, genInner, nest, generateRibPolygon, generateRibSVG, generateTemplateSVG, generateRibDXF, generateProfileJSON } from "./geometry.js";
+import { useState, useEffect, useRef, Component } from "react";
+import { VESSEL, PROFILES, computeVolumes, RIM_TYPES, rimGeometry, genInner, nest, generateRibPolygon, generateRibSVG, generateTemplateSVG, generateRibDXF, generateProfileJSON, applyInnerFillet, catmullRomResample } from "./geometry.js";
+
+class ErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error("ErrorBoundary caught:", error, info.componentStack); }
+  render() {
+    if (this.state.error) return <div style={{ padding: 40, color: "red", fontFamily: "monospace", whiteSpace: "pre-wrap" }}>
+      <h2>Render Error</h2><p>{this.state.error.message}</p><p>{this.state.error.stack}</p>
+      <button onClick={() => this.setState({ error: null })}>Retry</button>
+    </div>;
+    return this.props.children;
+  }
+}
 
 const mono = "'IBM Plex Mono', 'Menlo', monospace";
 const serif = "'Fraunces', 'Georgia', serif";
@@ -128,7 +141,8 @@ function CrossSection({ p, bowls, showNesting, showAnnotations, rimType, selecte
   const lipH = p.rimLip.height * (ab ? ab.s : 1);
   const lipOv = p.rimLip.overhang * (ab ? ab.s : 1);
 
-  const innerWall = outerData.map(([r, h]) => [r, h + floorTop]);
+  const innerWallRaw = outerData.map(([r, h]) => [r, h + floorTop]);
+  const innerWall = applyInnerFillet(innerWallRaw, 5, floorTop);
   const outerWallCurve = outerData.map(([r, h]) => [r + wt, h + floorTop]);
   const fullOuterPts = [[footOR, footHt], outerWallCurve[0], ...outerWallCurve.slice(1)];
   const wallTopH = innerWall[innerWall.length - 1][1];
@@ -226,7 +240,8 @@ function CrossSection({ p, bowls, showNesting, showAnnotations, rimType, selecte
         const bFloorT = b.floorT;
         const bFloorTop = b.baseY + bFootH + bFloorT;
 
-        const bInner = b.outer.map(([r, h]) => [r, h + bFloorTop]);
+        const bInnerRaw = b.outer.map(([r, h]) => [r, h + bFloorTop]);
+        const bInner = applyInnerFillet(bInnerRaw, 5 * b.s, bFloorTop);
         const bOuter = b.outer.map(([r, h]) => [r + bWt, h + bFloorTop]);
         const bFullOuter = [[b.footOuter, b.baseY + bFootH], bOuter[0], ...bOuter.slice(1)];
 
@@ -356,7 +371,7 @@ function CrossSection({ p, bowls, showNesting, showAnnotations, rimType, selecte
             <text x={fL - 7} y={midY + 2} textAnchor="end" fontSize="4.5" fill={P.purple} fontFamily={mono}>{fmt(footHt)}</text>
           </g>);
         })()}
-        {(() => { const mi = Math.floor(innerWall.length / 2), ir = innerWall[mi], or = outerWallCurve[mi]; return (<g>
+        {(() => { const mi = Math.floor(outerWallCurve.length / 2), ir = innerWall[innerWall.length - outerWallCurve.length + mi], or = outerWallCurve[mi]; return (<g>
           <line x1={tx(ir[0])} y1={ty(ir[1])} x2={tx(or[0])} y2={ty(or[1])} stroke={P.accent} strokeWidth={1.5} />
           <text x={tx(or[0]) + 5} y={ty(or[1]) + 3} fontSize="6" fill={P.accent} fontFamily={mono}>{fmt(wt)} wall</text>
         </g>); })()}
@@ -382,7 +397,7 @@ function CrossSection({ p, bowls, showNesting, showAnnotations, rimType, selecte
 // Right edge = outer wall curve (real radii), Left edge = inner wall curve
 // Rib IS the bowl wall cross-section — fits like a puzzle piece
 // ═══════════════════════════════════════════════════════════
-function RibToolView({ bowls, p, ribGap, profileName, imperial }) {
+function RibToolView({ bowls, p, ribGap, profileName, rimType, showRim, imperial }) {
   const sc = 2.0;
   const mm2in = v => (v / 25.4).toFixed(2) + '"';
   const fmt = v => imperial ? mm2in(v) : v.toFixed(1) + 'mm';
@@ -391,20 +406,29 @@ function RibToolView({ bowls, p, ribGap, profileName, imperial }) {
   // One combined rib per bowl
   const ribs = bowls.map((b, i) => {
     const poly = generateRibPolygon(b, p, ribGap);
+    const sLipH = p.rimLip.height * b.s;
+    const sLipOv = p.rimLip.overhang * b.s;
     return {
       label: `B${i + 1}`, sublabel: fmtI(b.rim),
       bowlColor: C[i % 6], poly,
-      wallH: poly.wallH, stepH: poly.stepH, gap: poly.gap,
+      outerWallH: poly.outerWallH, innerWallH: poly.innerWallH,
+      outerStepH: poly.outerStepH, gap: poly.gap,
+      sLipH, sLipOv,
     };
   });
 
-  // Layout
-  const measW = 52;
+  // Layout — multi-row grid for 4+ bowls
+  const compact = ribs.length >= 4;
+  const measW = compact ? 28 : 52;
   const spacing = 20 + measW;
-  let totalW = 25;
-  ribs.forEach(r => { totalW += r.poly.width * sc + spacing; });
-  const globalMaxH = Math.max(...ribs.map(r => r.poly.height));
-  const svgH = globalMaxH * sc + 65;
+  const globalMaxH = Math.max(...ribs.map(r => r.poly.height + (showRim ? r.sLipH : 0)));
+  const maxPolyW = Math.max(...ribs.map(r => r.poly.width));
+  const cellW = maxPolyW * sc + spacing + 10;
+  const cols = ribs.length <= 3 ? ribs.length : 3;
+  const rows = Math.ceil(ribs.length / cols);
+  const rowH = globalMaxH * sc + 95;
+  const totalW = cols * cellW + 20;
+  const svgH = rows * rowH;
 
   // Grid
   const gridStep = 10 * sc;
@@ -416,123 +440,252 @@ function RibToolView({ bowls, p, ribGap, profileName, imperial }) {
         <pattern id="ribgrid" width={gridStep} height={gridStep} patternUnits="userSpaceOnUse">
           <path d={`M ${gridStep} 0 L 0 0 0 ${gridStep}`} fill="none" stroke={P.grid} strokeWidth={0.3} />
         </pattern>
+        {/* Beechwood grain texture */}
+        <filter id="woodgrain" x="0%" y="0%" width="100%" height="100%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.03 0.3" numOctaves={4} seed={7} result="noise" />
+          <feColorMatrix type="saturate" values="0" in="noise" result="mono" />
+          <feComponentTransfer in="mono" result="grain">
+            <feFuncR type="linear" slope="0.12" intercept="0" />
+            <feFuncG type="linear" slope="0.10" intercept="0" />
+            <feFuncB type="linear" slope="0.06" intercept="0" />
+            <feFuncA type="linear" slope="0.45" intercept="0" />
+          </feComponentTransfer>
+          <feFlood floodColor="#c8a06a" result="base" />
+          <feBlend in="grain" in2="base" mode="multiply" result="wood" />
+          <feComposite in="wood" in2="SourceGraphic" operator="in" />
+        </filter>
+        {/* Subtle inner shadow for depth */}
+        <filter id="ribshadow" x="-5%" y="-5%" width="110%" height="110%">
+          <feGaussianBlur in="SourceAlpha" stdDeviation="1.5" result="blur" />
+          <feOffset dx="0.5" dy="1" result="shifted" />
+          <feFlood floodColor="#3a2a1a" floodOpacity="0.25" result="color" />
+          <feComposite in="color" in2="shifted" operator="in" result="shadow" />
+          <feMerge>
+            <feMergeNode in="shadow" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
       </defs>
       <rect x={0} y={0} width={Math.max(totalW, 200)} height={svgH} fill="url(#ribgrid)" />
 
       {/* Grid legend */}
       <g transform={`translate(${Math.max(totalW, 200) - 28},${svgH - 26})`}>
         <rect x={0} y={0} width={gridStep} height={gridStep} fill={P.grid + "44"} stroke={P.textFaint} strokeWidth={0.5} />
-        <text x={gridStep / 2} y={gridStep + 8} textAnchor="middle" fontSize="4" fill={P.textFaint} fontFamily={mono}>{gridLabel}</text>
+        <text x={gridStep / 2} y={gridStep + 9} textAnchor="middle" fontSize="5.5" fill={P.textFaint} fontFamily={mono}>{gridLabel}</text>
       </g>
 
-      {(() => {
-        let xOff = 20;
-        return ribs.map((r, ri) => {
-          const x0 = xOff;
-          xOff += r.poly.width * sc + spacing;
-          const poly = r.poly;
+      {ribs.map((r, ri) => {
+        const col = ri % cols;
+        const row = Math.floor(ri / cols);
+        const x0 = col * cellW + 20;
+        const y0 = row * rowH;
+        const poly = r.poly;
 
-          // Convert polygon point to SVG coords
-          const toSvg = ([px, py]) => [
-            (px - poly.minX + 4) * sc + x0,
-            (globalMaxH - py) * sc + 26,
-          ];
+        // Convert polygon point to SVG coords
+        const toSvg = ([px, py]) => [
+          (px - poly.minX + 4) * sc + x0,
+          y0 + (globalMaxH - py) * sc + 26,
+        ];
 
-          // Build outline path
-          const outlinePts = poly.points.map(pt => toSvg(pt).map(v => v.toFixed(1)).join(",")).join(" ");
+        // Build outline path
+        const outlinePts = poly.points.map(pt => toSvg(pt).map(v => v.toFixed(1)).join(",")).join(" ");
 
-          // Reference points
-          const [blX, blY] = toSvg([poly.minX, 0]); // bottom-left area
-          const [brX, brY] = toSvg([poly.gap, 0]); // bottom-right area
-          const baseY = Math.max(blY, brY);
+        // Reference points
+        const [blX, blY] = toSvg([poly.minX, 0]); // bottom-left area
+        const [brX, brY] = toSvg([poly.gap, 0]); // bottom-right area
+        const baseY = Math.max(blY, brY);
 
-          // Find rim points (top of left & right edges)
-          const leftRimPt = toSvg([0, poly.stepH + poly.wallH]);
-          const rightRimPt = toSvg([poly.gap, poly.stepH + poly.wallH]);
-          const cX = (leftRimPt[0] + rightRimPt[0]) / 2;
+        // Find rim points (top of left & right edges)
+        const leftRimPt = toSvg([0, poly.innerWallH]);
+        const rightRimPt = toSvg([poly.gap, poly.outerStepH + poly.outerWallH]);
+        const cX = (leftRimPt[0] + rightRimPt[0]) / 2;
 
-          // Hanging hole
-          const [hcx, hcy] = toSvg([poly.hole.cx, poly.hole.cy]);
-          const holeR = poly.hole.r * sc;
+        // Edge midpoints for INNER/OUTER labels
+        const innerMidPt = toSvg([poly.minX, poly.innerWallH / 2]);
+        const outerMidPt = toSvg([poly.maxX, poly.outerStepH + poly.outerWallH / 2]);
 
-          // Height dimension positions
-          const hToY = h => (globalMaxH - h) * sc + 26;
-          const rimY = hToY(poly.stepH + poly.wallH);
-          const floorY = hToY(poly.stepH);
-          const tableY = hToY(0);
-          const mx = Math.max(brX, rightRimPt[0]) + 8;
+        // Hanging hole
+        const [hcx, hcy] = toSvg([poly.hole.cx, poly.hole.cy]);
+        const holeR = poly.hole.r * sc;
 
-          return (
-            <g key={ri}>
-              {/* Title */}
-              <text x={cX} y={10} textAnchor="middle" fontSize="6.5" fill={P.accent} fontFamily={mono} fontWeight="700">{r.label}</text>
-              <text x={cX} y={19} textAnchor="middle" fontSize="5" fill={r.bowlColor} fontFamily={mono}>{r.sublabel}</text>
+        // Height dimension positions
+        const hToY = h => y0 + (globalMaxH - h) * sc + 26;
+        const outerRimY = hToY(poly.outerStepH + poly.outerWallH);
+        const outerFloorY = hToY(poly.outerStepH);
+        const tableY = hToY(0);
+        const mx = Math.max(brX, rightRimPt[0]) + 8;
 
-              {/* Rib outline — inner edge green, outer edge gray */}
-              <polygon points={outlinePts} fill={P.accent + "08"} stroke={P.accent} strokeWidth={1.2} strokeLinejoin="round" />
+        return (
+          <g key={ri}>
+            {/* Title */}
+            <text x={cX} y={y0 + 10} textAnchor="middle" fontSize="9" fill={P.accent} fontFamily={mono} fontWeight="700">{r.label}</text>
+            <text x={cX} y={y0 + 20} textAnchor="middle" fontSize="7" fill={r.bowlColor} fontFamily={mono}>{r.sublabel}</text>
 
-              {/* Highlight inner edge (left side, above step) */}
-              {(() => {
-                const innerPts = [];
-                const innerWall = bowls[ri].inner;
-                const innerBaseR = innerWall[0][0];
-                for (let i = innerWall.length - 1; i >= 0; i--) {
-                  const sweep = innerWall[i][0] - innerBaseR;
-                  innerPts.push(toSvg([-sweep, poly.stepH + innerWall[i][1]]));
+            {/* Rib body — beechwood fill with char edge */}
+            <polygon points={outlinePts} fill="#c8a06a" filter="url(#woodgrain)" strokeLinejoin="round" stroke="none" />
+            <polygon points={outlinePts} fill="none" stroke="#3a2518" strokeWidth={1.6} strokeLinejoin="round" filter="url(#ribshadow)" />
+
+            {/* Rim cross-section halves — split rim placed at each wall top */}
+            {showRim && (() => {
+              const lh = r.sLipH * sc;
+              const ov = r.sLipOv * sc;
+              if (lh < 1) return null;
+              const hw = p.wallThickness * bowls[ri].s * sc / 2;
+              const k = 0.55; // bezier quarter-ellipse approximation
+              // Inner wall top vertex (left half anchor)
+              const iw = bowls[ri].inner;
+              const iwSweep = iw[iw.length - 1][0] - iw[0][0];
+              const [ax, ay] = toSvg([-iwSweep, poly.innerWallH]);
+              // Outer wall top vertex (right half anchor)
+              const ow = bowls[ri].outer;
+              const owSweep = ow[ow.length - 1][0] - ow[0][0];
+              const [ox, oy] = toSvg([poly.gap - owSweep, poly.outerStepH + poly.outerWallH]);
+              // Angle of top edge
+              const ang = Math.atan2(oy - ay, ox - ax) * 180 / Math.PI;
+              // Left half: outer edge from (ax,ay) up to cut face top (ax+hw, ay-lh)
+              // Right half: outer edge from (ox,oy) up to cut face top (ox-hw, oy-lh)
+              let le, re; // edge paths (outer contour + cut face, no base)
+              switch (rimType) {
+                case "rounded":
+                  le = `M${ax},${ay} C${ax},${ay-lh*k} ${ax+hw*(1-k)},${ay-lh} ${ax+hw},${ay-lh} L${ax+hw},${ay}`;
+                  re = `M${ox},${oy} C${ox},${oy-lh*k} ${ox-hw*(1-k)},${oy-lh} ${ox-hw},${oy-lh} L${ox-hw},${oy}`;
+                  break;
+                case "straight":
+                  le = `M${ax},${ay} L${ax},${ay-lh} L${ax+hw},${ay-lh} L${ax+hw},${ay}`;
+                  re = `M${ox},${oy} L${ox},${oy-lh} L${ox-hw},${oy-lh} L${ox-hw},${oy}`;
+                  break;
+                case "beveled": {
+                  const bvl = Math.min(lh * 0.5, hw * 0.7);
+                  le = `M${ax},${ay} L${ax},${ay-lh} L${ax+hw},${ay-lh} L${ax+hw},${ay}`;
+                  re = `M${ox},${oy} L${ox},${oy-lh+bvl} L${ox-bvl},${oy-lh} L${ox-hw},${oy-lh} L${ox-hw},${oy}`;
+                  break;
                 }
-                if (innerPts.length < 2) return null;
-                const d = innerPts.map((pt, j) => `${j === 0 ? 'M' : 'L'}${pt[0].toFixed(1)},${pt[1].toFixed(1)}`).join(' ');
-                return <path d={d} fill="none" stroke={P.inner} strokeWidth={1.8} strokeLinecap="round" />;
-              })()}
-
-              {/* Highlight outer edge (right side, above step) */}
-              {(() => {
-                const outerPts = [];
-                const outerWall = bowls[ri].outer;
-                const outerBaseR = outerWall[0][0];
-                for (let i = 0; i < outerWall.length; i++) {
-                  const sweep = outerWall[i][0] - outerBaseR;
-                  outerPts.push(toSvg([poly.gap + sweep, poly.stepH + outerWall[i][1]]));
+                case "flared":
+                  le = `M${ax},${ay} C${ax-ov*0.15},${ay-lh*0.5} ${ax-ov*0.3},${ay-lh} ${ax+hw},${ay-lh} L${ax+hw},${ay}`;
+                  re = `M${ox},${oy} C${ox+ov*0.15},${oy-lh*0.5} ${ox+ov*0.3},${oy-lh} ${ox-hw},${oy-lh} L${ox-hw},${oy}`;
+                  break;
+                case "tulip":
+                  le = `M${ax},${ay} C${ax+hw*0.2},${ay-lh*0.3} ${ax},${ay-lh*0.8} ${ax+hw},${ay-lh} L${ax+hw},${ay}`;
+                  re = `M${ox},${oy} C${ox-hw*0.2},${oy-lh*0.3} ${ox},${oy-lh*0.8} ${ox-hw},${oy-lh} L${ox-hw},${oy}`;
+                  break;
+                case "rolled":
+                  le = `M${ax},${ay} L${ax},${ay-lh} L${ax+hw},${ay-lh} L${ax+hw},${ay}`;
+                  re = `M${ox},${oy} C${ox+ov},${oy} ${ox+ov},${oy-lh} ${ox},${oy-lh} L${ox-hw},${oy-lh} L${ox-hw},${oy}`;
+                  break;
+                case "flanged": {
+                  const shW = ov + hw;
+                  le = `M${ax},${ay} L${ax},${ay-lh} L${ax+hw},${ay-lh} L${ax+hw},${ay}`;
+                  re = `M${ox},${oy} L${ox},${oy-lh} L${ox+shW},${oy-lh} L${ox+shW},${oy-lh*0.4} L${ox-hw},${oy}`;
+                  break;
                 }
-                if (outerPts.length < 2) return null;
-                const d = outerPts.map((pt, j) => `${j === 0 ? 'M' : 'L'}${pt[0].toFixed(1)},${pt[1].toFixed(1)}`).join(' ');
-                return <path d={d} fill="none" stroke={P.textMuted} strokeWidth={1.8} strokeLinecap="round" />;
-              })()}
+                case "tapered":
+                  le = `M${ax},${ay} L${ax+hw},${ay-lh} L${ax+hw},${ay}`;
+                  re = `M${ox},${oy} L${ox-hw},${oy-lh} L${ox-hw},${oy}`;
+                  break;
+                case "coupe":
+                  le = `M${ax},${ay} C${ax},${ay-lh*0.35} ${ax+hw*0.5},${ay-lh*0.5} ${ax+hw},${ay-lh*0.5} L${ax+hw},${ay}`;
+                  re = `M${ox},${oy} C${ox},${oy-lh*0.35} ${ox-hw*0.5},${oy-lh*0.5} ${ox-hw},${oy-lh*0.5} L${ox-hw},${oy}`;
+                  break;
+                case "thickened": {
+                  const blg = Math.max(ov * 0.3, hw * 0.3);
+                  le = `M${ax},${ay} C${ax-blg},${ay} ${ax-blg},${ay-lh} ${ax+hw},${ay-lh} L${ax+hw},${ay}`;
+                  re = `M${ox},${oy} C${ox+blg},${oy} ${ox+blg},${oy-lh} ${ox-hw},${oy-lh} L${ox-hw},${oy}`;
+                  break;
+                }
+                default:
+                  le = `M${ax},${ay} C${ax},${ay-lh*k} ${ax+hw*(1-k)},${ay-lh} ${ax+hw},${ay-lh} L${ax+hw},${ay}`;
+                  re = `M${ox},${oy} C${ox},${oy-lh*k} ${ox-hw*(1-k)},${oy-lh} ${ox-hw},${oy-lh} L${ox-hw},${oy}`;
+              }
+              return <>
+                <g transform={`rotate(${ang.toFixed(2)}, ${ax}, ${ay})`}>
+                  <path d={le + " Z"} fill="#c8a06a" filter="url(#woodgrain)" stroke="none" />
+                  <path d={le} fill="none" stroke="#3a2518" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
+                </g>
+                <g transform={`rotate(${ang.toFixed(2)}, ${ox}, ${oy})`}>
+                  <path d={re + " Z"} fill="#c8a06a" filter="url(#woodgrain)" stroke="none" />
+                  <path d={re} fill="none" stroke="#3a2518" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
+                </g>
+              </>;
+            })()}
 
-              {/* Flat base highlight */}
-              <line x1={blX} y1={baseY} x2={brX} y2={baseY}
-                stroke={P.rim} strokeWidth={2.5} strokeLinecap="round" />
-              <text x={(blX + brX) / 2} y={baseY + 11} textAnchor="middle" fontSize="4" fill={P.rim} fontFamily={mono} fontWeight="600">
-                FLAT · wheel true
-              </text>
+            {/* Highlight inner edge (left side, flush at wheel) */}
+            {(() => {
+              const innerPts = [];
+              const innerWall = bowls[ri].inner;
+              const innerBaseR = innerWall[0][0];
+              for (let i = innerWall.length - 1; i >= 0; i--) {
+                const sweep = innerWall[i][0] - innerBaseR;
+                innerPts.push(toSvg([-sweep, innerWall[i][1]]));
+              }
+              if (innerPts.length < 2) return null;
+              const d = innerPts.map((pt, j) => `${j === 0 ? 'M' : 'L'}${pt[0].toFixed(1)},${pt[1].toFixed(1)}`).join(' ');
+              return <path d={d} fill="none" stroke={P.inner} strokeWidth={1.8} strokeLinecap="round" />;
+            })()}
 
-              {/* Hanging hole */}
-              {holeR > 2 && <circle cx={hcx} cy={hcy} r={holeR} fill={P.svgBg} stroke={P.accent + "44"} strokeWidth={0.7} />}
+            {/* Highlight outer edge (right side, above step) */}
+            {(() => {
+              const outerPts = [];
+              const outerWall = bowls[ri].outer;
+              const outerBaseR = outerWall[0][0];
+              for (let i = 0; i < outerWall.length; i++) {
+                const sweep = outerWall[i][0] - outerBaseR;
+                outerPts.push(toSvg([poly.gap - sweep, poly.outerStepH + outerWall[i][1]]));
+              }
+              if (outerPts.length < 2) return null;
+              const d = outerPts.map((pt, j) => `${j === 0 ? 'M' : 'L'}${pt[0].toFixed(1)},${pt[1].toFixed(1)}`).join(' ');
+              return <path d={d} fill="none" stroke={P.textMuted} strokeWidth={1.8} strokeLinecap="round" />;
+            })()}
 
-              {/* Edge labels */}
-              <text x={leftRimPt[0] - 2} y={leftRimPt[1] - 3} textAnchor="end" fontSize="4" fill={P.inner} fontFamily={mono} fontWeight="600">INNER</text>
-              <text x={rightRimPt[0] + 2} y={rightRimPt[1] - 3} textAnchor="start" fontSize="4" fill={P.textMuted} fontFamily={mono} fontWeight="600">OUTER</text>
-              <text x={cX} y={Math.min(leftRimPt[1], rightRimPt[1]) - 7} textAnchor="middle" fontSize="4" fill={P.textFaint} fontFamily={mono}>▲ rim</text>
+            {/* Flat base highlight */}
+            <line x1={blX} y1={baseY} x2={brX} y2={baseY}
+              stroke="#3a2518" strokeWidth={2.5} strokeLinecap="round" />
+            <text x={(blX + brX) / 2} y={baseY + 12} textAnchor="middle" fontSize="5.5" fill={P.textMuted} fontFamily={mono} fontWeight="600">
+              {compact ? "FLAT" : "FLAT \u00b7 wheel true"}
+            </text>
 
-              {/* Gap annotation */}
-              <text x={cX} y={(floorY + tableY) / 2 + 2} textAnchor="middle" fontSize="3.5" fill={P.textFaint} fontFamily={mono}>
-                {fmtI(r.gap)} gap
-              </text>
+            {/* Hanging hole — dark interior with char ring */}
+            {holeR > 2 && <>
+              <circle cx={hcx} cy={hcy} r={holeR + 0.6} fill="#3a2518" />
+              <circle cx={hcx} cy={hcy} r={holeR} fill={P.svgBg} />
+              <circle cx={hcx} cy={hcy} r={holeR - 0.3} fill="#1a1410" opacity={0.15} />
+            </>}
 
-              {/* Wall height dimension */}
-              <line x1={mx} y1={rimY} x2={mx} y2={floorY} stroke={P.accent + "44"} strokeWidth={0.5} />
-              <line x1={mx - 2} y1={rimY} x2={mx + 2} y2={rimY} stroke={P.accent + "44"} strokeWidth={0.5} />
-              <line x1={mx - 2} y1={floorY} x2={mx + 2} y2={floorY} stroke={P.accent + "44"} strokeWidth={0.5} />
-              <text x={mx + 4} y={(rimY + floorY) / 2 + 2} fontSize="3.8" fill={P.accent} fontFamily={mono}>{fmtI(r.wallH)} wall</text>
+            {/* Engraved profile name */}
+            {!compact && <text x={cX} y={(baseY + Math.min(leftRimPt[1], rightRimPt[1])) / 2 + 6} textAnchor="middle" fontSize="5" fill="#6b4a2a" opacity={0.55} fontFamily={serif} fontStyle="italic" fontWeight="300">{profileName}</text>}
 
-              {/* Step height */}
-              <line x1={mx} y1={floorY} x2={mx} y2={tableY} stroke={`${P.purple}44`} strokeWidth={0.5} />
+            {/* Edge labels — positioned at vertical midpoint of each edge */}
+            <text x={innerMidPt[0] - 4} y={innerMidPt[1]} textAnchor="end" dominantBaseline="central" fontSize="5.5" fill={P.inner} fontFamily={mono} fontWeight="600">INNER</text>
+            <text x={cX} y={Math.min(leftRimPt[1], rightRimPt[1]) - 8} textAnchor="middle" fontSize="5.5" fill={P.textFaint} fontFamily={mono}>▲ rim</text>
+
+            {/* Width dimension (horizontal, below base) */}
+            {(() => {
+              const wy = baseY + 20;
+              return <>
+                <line x1={blX} y1={wy} x2={brX} y2={wy} stroke={P.textFaint + "66"} strokeWidth={0.5} />
+                <line x1={blX} y1={wy - 2} x2={blX} y2={wy + 2} stroke={P.textFaint + "66"} strokeWidth={0.5} />
+                <line x1={brX} y1={wy - 2} x2={brX} y2={wy + 2} stroke={P.textFaint + "66"} strokeWidth={0.5} />
+                <text x={(blX + brX) / 2} y={wy + 9} textAnchor="middle" fontSize="5" fill={P.textFaint} fontFamily={mono}>{fmtI(r.gap)} width</text>
+              </>;
+            })()}
+
+            {/* Wall height dimension (outer side) */}
+            <line x1={mx} y1={outerRimY} x2={mx} y2={outerFloorY} stroke={P.accent + "44"} strokeWidth={0.5} />
+            <line x1={mx - 2} y1={outerRimY} x2={mx + 2} y2={outerRimY} stroke={P.accent + "44"} strokeWidth={0.5} />
+            <line x1={mx - 2} y1={outerFloorY} x2={mx + 2} y2={outerFloorY} stroke={P.accent + "44"} strokeWidth={0.5} />
+            <text x={mx + 5} y={(outerRimY + outerFloorY) / 2 + 2} fontSize="5.5" fill={P.accent} fontFamily={mono}>{fmtI(r.outerWallH)} wall</text>
+
+            {/* OUTER label — above dimension lines on right */}
+            <text x={mx} y={outerRimY - 5} textAnchor="middle" fontSize="5.5" fill={P.textMuted} fontFamily={mono} fontWeight="600">OUTER</text>
+
+            {/* Outer step height (foot only) — hidden in compact mode */}
+            {!compact && <>
+              <line x1={mx} y1={outerFloorY} x2={mx} y2={tableY} stroke={`${P.purple}44`} strokeWidth={0.5} />
               <line x1={mx - 2} y1={tableY} x2={mx + 2} y2={tableY} stroke={`${P.purple}44`} strokeWidth={0.5} />
-              <text x={mx + 4} y={(floorY + tableY) / 2 + 2} fontSize="3.5" fill={P.purple} fontFamily={mono}>{fmt(r.stepH)} step</text>
-            </g>
-          );
-        });
-      })()}
+              <text x={mx + 5} y={(outerFloorY + tableY) / 2 + 2} fontSize="5" fill={P.purple} fontFamily={mono}>{fmt(r.outerStepH)} step</text>
+            </>}
+          </g>
+        );
+      })}
     </svg>
   );
 }
@@ -1089,7 +1242,8 @@ function ThrowingGuide({ p, vol, shrinkage, imperial, clayBody }) {
 // ═══════════════════════════════════════════════════════════
 // MAIN
 // ═══════════════════════════════════════════════════════════
-export default function App() {
+export default function App() { return <ErrorBoundary><AppInner /></ErrorBoundary>; }
+function AppInner() {
   const [tab, setTab] = useState("design");
   const [prof, setProf] = useState("fargklar-real");
   const [nB, setNB] = useState(4);
@@ -1097,6 +1251,7 @@ export default function App() {
   const [showN, setShowN] = useState(true);
   const [showA, setShowA] = useState(true);
   const [showRibs, setShowRibs] = useState(false);
+  const [showRibRim, setShowRibRim] = useState(true);
   const [selectedBowl, setSelectedBowl] = useState(null);
   const [imperial, setImperial] = useState(true);
   const [dark, setDark] = useState(false);
@@ -1130,8 +1285,9 @@ export default function App() {
   useEffect(() => { const b = PROFILES[prof]; setWallT(b.wallThickness); setFloorT(b.floor.thickness); setFootH(b.foot.height); setFootOR(b.foot.outerRadius); setFootIR(b.foot.innerRadius); setLipH(b.rimLip.height); setLipOv(b.rimLip.overhang); }, [prof]);
 
   const isCustom = prof === "custom";
+  const smoothOuter = isCustom ? catmullRomResample(customOuter) : null;
   const p = isCustom
-    ? { ...base, wallThickness: wallT, floor: { thickness: floorT }, foot: { outerRadius: footOR, innerRadius: footIR, height: footH }, rimLip: { height: lipH, overhang: lipOv }, outer: customOuter, rimDiameter: customRimDia, interiorDepth: customDepth }
+    ? { ...base, wallThickness: wallT, floor: { thickness: floorT }, foot: { outerRadius: footOR, innerRadius: footIR, height: footH }, rimLip: { height: lipH, overhang: lipOv }, outer: smoothOuter, rimDiameter: customRimDia, interiorDepth: customDepth }
     : { ...base, wallThickness: wallT, floor: { thickness: floorT }, foot: { outerRadius: footOR, innerRadius: footIR, height: footH }, rimLip: { height: lipH, overhang: lipOv } };
   const bowls = nest(p, nB, gap);
   const vol = computeVolumes(p);
@@ -1281,6 +1437,10 @@ export default function App() {
                   <input type="checkbox" checked={showRibs} onChange={e => setShowRibs(e.target.checked)} style={{ accentColor: P.accent }} />
                   <span style={{ fontFamily: mono, fontSize: 10, color: P.textMuted }}>Rib tools</span>
                 </label>
+                {showRibs && <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+                  <input type="checkbox" checked={showRibRim} onChange={e => setShowRibRim(e.target.checked)} style={{ accentColor: P.accent }} />
+                  <span style={{ fontFamily: mono, fontSize: 10, color: P.textMuted }}>Rim</span>
+                </label>}
                 <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
                   <span style={{ fontFamily: mono, fontSize: 10, color: P.textMuted, whiteSpace: "nowrap" }}>Gap {mm(ribGap)}</span>
                   <input type="range" min={30} max={80} step={1} value={ribGap} onChange={e => setRibGap(parseFloat(e.target.value))} style={{ width: 60, accentColor: P.accent }} />
@@ -1343,7 +1503,7 @@ export default function App() {
                   <div style={{ fontFamily: mono, fontSize: 9, color: P.textFaint, marginBottom: 8 }}>
                     Combined inner + outer wall profile · flat base = wheel true · {mm(ribGap)} gap
                   </div>
-                  <RibToolView bowls={bowls} p={p} ribGap={ribGap} profileName={p.name} imperial={imperial} />
+                  <RibToolView bowls={bowls} p={p} ribGap={ribGap} profileName={p.name} rimType={rimType} showRim={showRibRim} imperial={imperial} />
                 </Card>
               )}
 

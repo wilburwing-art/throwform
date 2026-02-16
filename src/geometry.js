@@ -368,22 +368,20 @@ export function rimGeometry(type, iR, oR, h, lipH, overhang, wt, tx, ty, side) {
 export function generateRibPolygon(bowl, p, ribGap, opts = {}) {
   const { filletRadius = 2.5, holeRadius = 3.5 } = opts;
 
-  const stepH = bowl.footH + bowl.floorT;
-  const innerWall = bowl.inner;
+  const outerStepH = bowl.footH;
+  const innerWall = bowl.inner; // already filleted from genInner
   const outerWall = bowl.outer;
 
   const innerBaseR = innerWall[0][0];
   const outerBaseR = outerWall[0][0];
 
-  const wallH = Math.max(
-    ...innerWall.map(([, h]) => h),
-    ...outerWall.map(([, h]) => h),
-  );
-  const totalH = stepH + wallH;
+  const innerWallH = Math.max(...innerWall.map(([, h]) => h));
+  const outerWallH = Math.max(...outerWall.map(([, h]) => h));
+  const totalH = Math.max(outerStepH + outerWallH, innerWallH);
   const gap = ribGap;
 
-  // Clamp fillet to avoid overlapping geometry
-  const fr = Math.max(0.5, Math.min(filletRadius, stepH * 0.4, gap * 0.1));
+  // Bottom-right fillet (outer step corner)
+  const fr = Math.max(0.5, Math.min(filletRadius, outerStepH * 0.4, gap * 0.1));
 
   // Quarter-circle arc approximation
   const filletArc = (cx, cy, r, startDeg, endDeg, n = 8) => {
@@ -395,41 +393,33 @@ export function generateRibPolygon(bowl, p, ribGap, opts = {}) {
     return pts;
   };
 
-  // Assemble polygon clockwise:
-  // bottom-left fillet → bottom → bottom-right fillet → right step →
-  // outer curve up → top → inner curve down → left step → bottom-left fillet
+  // Assemble polygon:
+  // bottom-left → bottom → bottom-right fillet → right step →
+  // outer curve up → inner curve down (with fillet baked in) → close
   const points = [];
 
-  // 1. Bottom edge (after left fillet, before right fillet)
-  points.push([fr, 0]);
+  // 1. Bottom edge
+  points.push([0, 0]);
   points.push([gap - fr, 0]);
 
   // 2. Bottom-right fillet: center (gap-fr, fr), arc 270°→360°
   const brArc = filletArc(gap - fr, fr, fr, 270, 360);
   for (let i = 1; i < brArc.length; i++) points.push(brArc[i]);
 
-  // 3. Right edge: vertical through step zone
-  points.push([gap, stepH]);
+  // 3. Right edge: vertical through step zone (outer = foot only)
+  points.push([gap, outerStepH]);
 
-  // 4. Right edge: outer wall curve (floor → rim)
+  // 4. Right edge: outer wall curve (foot top → rim)
   for (let i = 0; i < outerWall.length; i++) {
     const sweep = outerWall[i][0] - outerBaseR;
-    points.push([gap + sweep, stepH + outerWall[i][1]]);
+    points.push([gap - sweep, outerStepH + outerWall[i][1]]);
   }
 
-  // 5. Left edge: inner wall curve (rim → floor, reversed)
+  // 5. Left edge: inner wall curve (rim → wheel, reversed, fillet included)
   for (let i = innerWall.length - 1; i >= 0; i--) {
     const sweep = innerWall[i][0] - innerBaseR;
-    points.push([-sweep, stepH + innerWall[i][1]]);
+    points.push([-sweep, innerWall[i][1]]);
   }
-
-  // 6. Left edge: vertical down through step zone
-  points.push([0, stepH]);
-  points.push([0, fr]);
-
-  // 7. Bottom-left fillet: center (fr, fr), arc 180°→270°
-  const blArc = filletArc(fr, fr, fr, 180, 270);
-  for (let i = 1; i < blArc.length; i++) points.push(blArc[i]);
 
   // Bounds
   const allX = points.map(([x]) => x);
@@ -448,8 +438,9 @@ export function generateRibPolygon(bowl, p, ribGap, opts = {}) {
     hole: { cx: holeCx, cy: holeCy, r: holeRadius },
     gap,
     totalH,
-    stepH,
-    wallH,
+    outerStepH,
+    outerWallH,
+    innerWallH,
     minX, maxX, minY, maxY,
     width: maxX - minX,
     height: maxY - minY,
@@ -680,9 +671,96 @@ export function generateProfileJSON(p, name) {
   return JSON.stringify(data, null, 2);
 }
 
-export function genInner(o, wt) { return o.map(([x, y], i) => [Math.max(x - wt * (1 + 0.3 * (1 - i / (o.length - 1))), 2), y]) }
+// Apply a rounded fillet where the inner wall curve meets the floor.
+// Works in profile coordinate space: [radius, height], floor→rim order.
+// Returns a new curve with fillet arc points replacing the sharp base corner.
+export function applyInnerFillet(curve, filletRadius, bottomY = 0) {
+  if (filletRadius <= 0 || curve.length < 2) return curve;
 
-export function nest(p, n, gap) {
+  const [r0, h0] = curve[0];
+  const [r1, h1] = curve[1];
+  const dx = r1 - r0;
+  const dy = h1 - h0;
+  const segLen = Math.sqrt(dx * dx + dy * dy);
+
+  if (segLen < 0.01 || dy < 0.01) return curve;
+
+  const tx = dx / segLen;
+  const ty = dy / segLen;
+
+  // Clamp: wall tangent point must stay within the first segment,
+  // and floor tangent radius must stay positive.
+  const maxFromSeg = segLen * ty / (1 - tx) * 0.9;
+  const maxFromRadius = Math.max(0, (r0 - 2) * ty / (1 - tx));
+  const R = Math.min(filletRadius, maxFromSeg, maxFromRadius);
+  if (R < 0.1) return curve;
+
+  // Fillet center: at distance R from both floor (y=bottomY) and tangent line
+  const cx = r0 - R * (1 - tx) / ty;
+  const cy = bottomY + R;
+
+  // Wall tangent point (foot of perpendicular from center to tangent line)
+  const d = R * (1 - tx) / ty;
+  const ptx = r0 + d * tx;
+  const pty = h0 + d * ty;
+
+  // Arc from floor tangent (cx, bottomY) to wall tangent (ptx, pty)
+  const sa = -Math.PI / 2; // floor tangent angle from center
+  let ea = Math.atan2(pty - cy, ptx - cx);
+  while (ea < sa) ea += 2 * Math.PI;
+
+  const nArc = 10;
+  const arcPts = [];
+  for (let j = 0; j <= nArc; j++) {
+    const a = sa + (ea - sa) * j / nArc;
+    arcPts.push([cx + R * Math.cos(a), cy + R * Math.sin(a)]);
+  }
+
+  // New curve: fillet arc → rest of original curve (skip base point)
+  return [...arcPts, ...curve.slice(1)];
+}
+
+export function catmullRomResample(points, count = 30, tension = 0.5) {
+  if (points.length < 2) return points.map(p => [...p]);
+  if (points.length === 2) {
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      const t = i / (count - 1);
+      out.push([
+        points[0][0] + t * (points[1][0] - points[0][0]),
+        points[0][1] + t * (points[1][1] - points[0][1]),
+      ]);
+    }
+    return out;
+  }
+  // Duplicate first/last for endpoint tangents (same as catmullRomPath in App.jsx)
+  const pts = [points[0], ...points, points[points.length - 1]];
+  const nSegs = pts.length - 3; // number of spline segments
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const g = (i / (count - 1)) * nSegs; // global parameter [0, nSegs]
+    const seg = Math.min(Math.floor(g), nSegs - 1);
+    const t = g - seg;
+    const p0 = pts[seg], p1 = pts[seg + 1], p2 = pts[seg + 2], p3 = pts[seg + 3];
+    // Catmull-Rom via cubic Bezier control points, then de Casteljau
+    const cp1r = p1[0] + (p2[0] - p0[0]) / (6 * tension);
+    const cp1h = p1[1] + (p2[1] - p0[1]) / (6 * tension);
+    const cp2r = p2[0] - (p3[0] - p1[0]) / (6 * tension);
+    const cp2h = p2[1] - (p3[1] - p1[1]) / (6 * tension);
+    const u = 1 - t;
+    const r = u*u*u*p1[0] + 3*u*u*t*cp1r + 3*u*t*t*cp2r + t*t*t*p2[0];
+    const h = u*u*u*p1[1] + 3*u*u*t*cp1h + 3*u*t*t*cp2h + t*t*t*p2[1];
+    out.push([r, h]);
+  }
+  return out;
+}
+
+export function genInner(o, wt, filletRadius = 5) {
+  const raw = o.map(([x, y], i) => [Math.max(x - wt * (1 + 0.3 * (1 - i / (o.length - 1))), 2), y]);
+  return filletRadius > 0 ? applyInnerFillet(raw, filletRadius, 0) : raw;
+}
+
+export function nest(p, n, gap, { innerFilletRadius = 5 } = {}) {
   const bowls = [], rimR = p.outer[p.outer.length - 1][0];
   for (let i = 0; i < n; i++) {
     const s = 1 - i * (p.wallThickness + gap) / rimR;
@@ -711,7 +789,7 @@ export function nest(p, n, gap) {
     }
 
     const th = p.interiorDepth * s + floorT + footH;
-    bowls.push({ i, label: `Bowl ${i + 1}`, s, outer: o, inner: genInner(o, p.wallThickness),
+    bowls.push({ i, label: `Bowl ${i + 1}`, s, outer: o, inner: genInner(o, p.wallThickness, innerFilletRadius),
       h: th, intDepth: p.interiorDepth * s, rim: p.rimDiameter * s,
       footOuter: fOuter, footInner: fInner,
       footH, floorT, baseY,

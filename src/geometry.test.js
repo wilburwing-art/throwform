@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { VESSEL, PROFILES, computeVolumes, RIM_TYPES, rimGeometry, genInner, nest } from "./geometry.js";
+import { VESSEL, PROFILES, computeVolumes, RIM_TYPES, rimGeometry, genInner, nest, applyInnerFillet, catmullRomResample } from "./geometry.js";
 
 // ═══════════════════════════════════════════════════════════
 // PROFILES data integrity
@@ -213,23 +213,23 @@ describe("RIM_TYPES", () => {
 // genInner
 // ═══════════════════════════════════════════════════════════
 describe("genInner", () => {
-  it("produces same number of points as input", () => {
+  it("produces same number of points as input (no fillet)", () => {
     const outer = [[30, 0], [40, 10], [50, 20]];
-    const inner = genInner(outer, 5);
+    const inner = genInner(outer, 5, 0);
     expect(inner.length).toBe(outer.length);
   });
 
-  it("inner radii are smaller than outer radii", () => {
+  it("inner radii are smaller than outer radii (no fillet)", () => {
     const outer = [[30, 0], [40, 10], [50, 20], [55, 30]];
-    const inner = genInner(outer, 5);
+    const inner = genInner(outer, 5, 0);
     for (let i = 0; i < outer.length; i++) {
       expect(inner[i][0]).toBeLessThan(outer[i][0]);
     }
   });
 
-  it("preserves heights", () => {
+  it("preserves heights (no fillet)", () => {
     const outer = [[30, 0], [40, 10], [50, 20]];
-    const inner = genInner(outer, 5);
+    const inner = genInner(outer, 5, 0);
     for (let i = 0; i < outer.length; i++) {
       expect(inner[i][1]).toBe(outer[i][1]);
     }
@@ -237,18 +237,90 @@ describe("genInner", () => {
 
   it("inner radii are at least 2 (floor clamp)", () => {
     const outer = [[5, 0], [6, 10]]; // Very small bowl
-    const inner = genInner(outer, 10); // Wall thicker than radius
+    const inner = genInner(outer, 10, 0); // Wall thicker than radius
     for (const pt of inner) {
       expect(pt[0]).toBeGreaterThanOrEqual(2);
     }
   });
 
-  it("wall offset is larger at base than rim", () => {
+  it("wall offset is larger at base than rim (no fillet)", () => {
     const outer = [[30, 0], [40, 10], [50, 20], [55, 30]];
-    const inner = genInner(outer, 5);
+    const inner = genInner(outer, 5, 0);
     const baseOffset = outer[0][0] - inner[0][0];
     const rimOffset = outer[outer.length - 1][0] - inner[outer.length - 1][0];
     expect(baseOffset).toBeGreaterThan(rimOffset);
+  });
+
+  it("with fillet, produces more points than input", () => {
+    const outer = [[30, 0], [40, 10], [50, 20], [55, 30]];
+    const inner = genInner(outer, 5, 5);
+    expect(inner.length).toBeGreaterThan(outer.length);
+  });
+
+  it("with fillet, first point starts near bottomY", () => {
+    const outer = [[30, 0], [40, 10], [50, 20], [55, 30]];
+    const inner = genInner(outer, 5, 5);
+    // Fillet arc starts at floor level (bottomY = 0)
+    expect(inner[0][1]).toBeCloseTo(0, 0);
+  });
+
+  it("with fillet, last point matches no-fillet rim", () => {
+    const outer = [[30, 0], [40, 10], [50, 20], [55, 30]];
+    const withFillet = genInner(outer, 5, 5);
+    const noFillet = genInner(outer, 5, 0);
+    const lastF = withFillet[withFillet.length - 1];
+    const lastN = noFillet[noFillet.length - 1];
+    expect(lastF[0]).toBeCloseTo(lastN[0], 5);
+    expect(lastF[1]).toBeCloseTo(lastN[1], 5);
+  });
+
+  it("default filletRadius is 5", () => {
+    const outer = [[30, 0], [40, 10], [50, 20]];
+    const defaultFillet = genInner(outer, 5);
+    const explicit5 = genInner(outer, 5, 5);
+    expect(defaultFillet.length).toBe(explicit5.length);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// applyInnerFillet
+// ═══════════════════════════════════════════════════════════
+describe("applyInnerFillet", () => {
+  it("returns original curve when filletRadius <= 0", () => {
+    const curve = [[25, 0], [35, 10], [45, 20]];
+    expect(applyInnerFillet(curve, 0)).toBe(curve);
+    expect(applyInnerFillet(curve, -1)).toBe(curve);
+  });
+
+  it("returns original curve when fewer than 2 points", () => {
+    const curve = [[25, 0]];
+    expect(applyInnerFillet(curve, 5)).toBe(curve);
+  });
+
+  it("adds arc points at the start of the curve", () => {
+    const curve = [[25, 0], [35, 10], [45, 20]];
+    const filleted = applyInnerFillet(curve, 5, 0);
+    expect(filleted.length).toBeGreaterThan(curve.length);
+    // Arc points come first, then original curve minus first point
+    expect(filleted[filleted.length - 1][0]).toBe(curve[curve.length - 1][0]);
+    expect(filleted[filleted.length - 1][1]).toBe(curve[curve.length - 1][1]);
+  });
+
+  it("arc starts at floor level (bottomY)", () => {
+    const curve = [[25, 5], [35, 15], [45, 25]];
+    const filleted = applyInnerFillet(curve, 3, 5);
+    // First arc point should be near bottomY
+    expect(filleted[0][1]).toBeCloseTo(5, 0);
+  });
+
+  it("clamps radius to avoid exceeding segment length", () => {
+    const curve = [[25, 0], [26, 1], [30, 10]]; // Very short first segment
+    const filleted = applyInnerFillet(curve, 50, 0); // Huge radius
+    // Should still produce valid output (clamped)
+    for (const [r, h] of filleted) {
+      expect(isFinite(r)).toBe(true);
+      expect(isFinite(h)).toBe(true);
+    }
   });
 });
 
@@ -332,5 +404,52 @@ describe("nest", () => {
       const expectedBaseY = parent.baseY + parent.footH + parent.floorT;
       expect(bowls[i].baseY).toBeCloseTo(expectedBaseY, 5);
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// catmullRomResample
+// ═══════════════════════════════════════════════════════════
+describe("catmullRomResample", () => {
+  it("returns requested number of points", () => {
+    const pts = [[20, 0], [30, 10], [40, 20], [55, 35], [70, 47]];
+    const out = catmullRomResample(pts, 25);
+    expect(out.length).toBe(25);
+  });
+
+  it("endpoints match input endpoints", () => {
+    const pts = [[20, 0], [30, 10], [40, 20], [55, 35], [70, 47]];
+    const out = catmullRomResample(pts, 30);
+    expect(out[0][0]).toBeCloseTo(20, 5);
+    expect(out[0][1]).toBeCloseTo(0, 5);
+    expect(out[out.length - 1][0]).toBeCloseTo(70, 5);
+    expect(out[out.length - 1][1]).toBeCloseTo(47, 5);
+  });
+
+  it("output height is monotonically non-decreasing for ascending input", () => {
+    const pts = [[20, 0], [30, 10], [40, 20], [55, 35], [70, 47]];
+    const out = catmullRomResample(pts, 40);
+    for (let i = 1; i < out.length; i++) {
+      expect(out[i][1]).toBeGreaterThanOrEqual(out[i - 1][1] - 0.5);
+    }
+  });
+
+  it("handles 2-point input with linear interpolation", () => {
+    const out = catmullRomResample([[10, 0], [50, 40]], 5);
+    expect(out.length).toBe(5);
+    expect(out[2][0]).toBeCloseTo(30, 5);
+    expect(out[2][1]).toBeCloseTo(20, 5);
+  });
+
+  it("handles single-point input", () => {
+    const out = catmullRomResample([[10, 5]]);
+    expect(out.length).toBe(1);
+    expect(out[0]).toEqual([10, 5]);
+  });
+
+  it("produces denser output than input for custom profile points", () => {
+    const custom = PROFILES.custom.outer;
+    const out = catmullRomResample(custom, 30);
+    expect(out.length).toBeGreaterThan(custom.length);
   });
 });
