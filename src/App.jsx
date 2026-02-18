@@ -218,7 +218,7 @@ function CrossSection({ p, bowls, showNesting, showAnnotations, rimType, selecte
         const ptsToD = pts => pts.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ") + "Z";
         const d = ptsToD(outerPts) + " " + ptsToD(innerPts) + " " + ptsToD(footHollow);
 
-        return <path d={d} fill={clayColor} stroke={clayStroke} strokeWidth={0.5} strokeLinejoin="round" fillRule="evenodd" />;
+        return <path d={d} fill={clayColor} fillRule="evenodd" />;
       })()}
 
       {/* Rim geometry — solid */}
@@ -598,12 +598,12 @@ function RibToolView({ bowls, p, ribGap, profileName, rimType, showRim, imperial
               }
               return <>
                 <g transform={`rotate(${ang.toFixed(2)}, ${ax}, ${ay})`}>
-                  <path d={le + " Z"} fill="#c8a06a" filter="url(#woodgrain)" stroke="none" />
-                  <path d={le} fill="none" stroke="#3a2518" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
-                </g>
-                <g transform={`rotate(${ang.toFixed(2)}, ${ox}, ${oy})`}>
                   <path d={re + " Z"} fill="#c8a06a" filter="url(#woodgrain)" stroke="none" />
                   <path d={re} fill="none" stroke="#3a2518" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
+                </g>
+                <g transform={`rotate(${ang.toFixed(2)}, ${ox}, ${oy})`}>
+                  <path d={le + " Z"} fill="#c8a06a" filter="url(#woodgrain)" stroke="none" />
+                  <path d={le} fill="none" stroke="#3a2518" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
                 </g>
               </>;
             })()}
@@ -1248,10 +1248,10 @@ function AppInner() {
   const [prof, setProf] = useState("fargklar-real");
   const [nB, setNB] = useState(4);
   const [gap, setGap] = useState(3);
-  const [showN, setShowN] = useState(true);
-  const [showA, setShowA] = useState(true);
-  const [showRibs, setShowRibs] = useState(false);
-  const [showRibRim, setShowRibRim] = useState(true);
+  const [showN, setShowN] = useState(false);
+  const [showA, setShowA] = useState(false);
+  const [showRibs, setShowRibs] = useState(true);
+  const [showRibRim, setShowRibRim] = useState(false);
   const [selectedBowl, setSelectedBowl] = useState(null);
   const [imperial, setImperial] = useState(true);
   const [dark, setDark] = useState(false);
@@ -1499,11 +1499,11 @@ function AppInner() {
               </Card>
 
               {showRibs && (
-                <Card title="RIB TOOLS — ONE PER BOWL" color={P.accent} glow>
+                <Card title={showN ? "RIB TOOLS — ONE PER BOWL" : "RIB TOOL"} color={P.accent} glow>
                   <div style={{ fontFamily: mono, fontSize: 9, color: P.textFaint, marginBottom: 8 }}>
                     Combined inner + outer wall profile · flat base = wheel true · {mm(ribGap)} gap
                   </div>
-                  <RibToolView bowls={bowls} p={p} ribGap={ribGap} profileName={p.name} rimType={rimType} showRim={showRibRim} imperial={imperial} />
+                  <RibToolView bowls={showN ? bowls : [bowls[0]]} p={p} ribGap={ribGap} profileName={p.name} rimType={rimType} showRim={showRibRim} imperial={imperial} />
                 </Card>
               )}
 
