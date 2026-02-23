@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, Component } from "react";
-import { VESSEL, PROFILES, computeVolumes, RIM_TYPES, rimGeometry, genInner, nest, generateRibPolygon, generateRibSVG, generateTemplateSVG, generateRibDXF, generateProfileJSON, applyInnerFillet, catmullRomResample } from "./geometry.js";
+import { VESSEL, PROFILES, computeVolumes, RIM_TYPES, rimGeometry, genInner, nest, nestMugs, STACKING_VESSELS, computeDraftAngle, computeNestingOffset, computeNestingEfficiency, computeStackHeight, validateMugStacking, generateRibPolygon, generateRibSVG, generateTemplateSVG, generateRibDXF, generateProfileJSON, applyInnerFillet, catmullRomResample } from "./geometry.js";
 
 class ErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null }; }
@@ -103,7 +103,7 @@ function Stat({ l, v, c = P.text }) {
 // ═══════════════════════════════════════════════════════════
 // CROSS-SECTION — with rim geometry types, mm grid, bowl selector
 // ═══════════════════════════════════════════════════════════
-function CrossSection({ p, bowls, showNesting, showAnnotations, rimType, selectedBowl, onSelectBowl, imperial, svgRef }) {
+function CrossSection({ p, bowls, showNesting, showAnnotations, rimType, selectedBowl, onSelectBowl, imperial, svgRef, isStacking }) {
   const sc = 1.5;
   const mm2in = v => (v / 25.4).toFixed(2) + '"';
   const fmt = v => imperial ? mm2in(v) : v.toFixed(1) + 'mm';
@@ -125,7 +125,11 @@ function CrossSection({ p, bowls, showNesting, showAnnotations, rimType, selecte
 
   const padL = 20, padR_val = showAnnotations ? 100 : 20, padT = 30, padB = 20;
   const vw = baseMaxOutR * sc * 2 + padL + padR_val;
-  const vh = baseVisTopH * sc + padT + padB;
+  const maxBowlTop = (isStacking && showNesting && bowls.length > 0)
+    ? Math.max(...bowls.map(b => b.baseY + b.h)) + baseHeadroom
+    : baseVisTopH;
+  const effectiveTopH = isStacking ? Math.max(baseVisTopH, maxBowlTop) : baseVisTopH;
+  const vh = effectiveTopH * sc + padT + padB;
   const cxv = padL + baseMaxOutR * sc;
 
   // ── DRAWING DATA from selected bowl (or base) ──
@@ -152,7 +156,7 @@ function CrossSection({ p, bowls, showNesting, showAnnotations, rimType, selecte
 
   // Transforms use FIXED base layout
   const tx = r => cxv + r * sc, txL = r => cxv - r * sc;
-  const ty = h => padT + (baseVisTopH - h) * sc;
+  const ty = h => padT + (effectiveTopH - h) * sc;
 
   const testRim = rimGeometry(rimType, innerTopR, outerTopR, wallTopH, lipH, lipOv, wt, r => r, h => h, "R");
   const rimTopH = testRim.topH;
@@ -329,12 +333,6 @@ function CrossSection({ p, bowls, showNesting, showAnnotations, rimType, selecte
       {/* Annotations */}
       {showAnnotations && (<g>
         {(() => { const x = tx(maxOutR + 4); return (<g>
-          <line x1={x} y1={ty(rimTopH)} x2={x} y2={ty(0)} stroke={`${P.accent}44`} strokeWidth={0.7} />
-          <line x1={x - 3} y1={ty(rimTopH)} x2={x + 3} y2={ty(rimTopH)} stroke={`${P.accent}44`} strokeWidth={0.7} />
-          <line x1={x - 3} y1={ty(0)} x2={x + 3} y2={ty(0)} stroke={`${P.accent}44`} strokeWidth={0.7} />
-          <text x={x + 6} y={(ty(rimTopH) + ty(0)) / 2 + 3} fontSize="6.5" fill={P.rim} fontFamily={mono}>{fmtI(rimTopH)} total</text>
-        </g>); })()}
-        {(() => { const x = tx(maxOutR + 22); return (<g>
           <line x1={x} y1={ty(rimTopH)} x2={x} y2={ty(wallTopH)} stroke={`${P.accent}44`} strokeWidth={0.7} />
           <line x1={x - 3} y1={ty(rimTopH)} x2={x + 3} y2={ty(rimTopH)} stroke={`${P.accent}44`} strokeWidth={0.7} />
           <line x1={x - 3} y1={ty(wallTopH)} x2={x + 3} y2={ty(wallTopH)} stroke={`${P.accent}44`} strokeWidth={0.7} />
@@ -346,7 +344,9 @@ function CrossSection({ p, bowls, showNesting, showAnnotations, rimType, selecte
           <line x1={x} y1={ty(floorTop)} x2={x} y2={ty(footHt)} stroke={`${P.textFaint}66`} strokeWidth={0.7} />
           <text x={x + 6} y={(ty(floorTop) + ty(footHt)) / 2 + 3} fontSize="5.5" fill={P.textFaint} fontFamily={mono}>{fmt(floorT)} floor</text>
           <line x1={x} y1={ty(footHt)} x2={x} y2={ty(0)} stroke={`${P.purple}44`} strokeWidth={0.7} />
+          <line x1={x - 3} y1={ty(0)} x2={x + 3} y2={ty(0)} stroke={`${P.purple}44`} strokeWidth={0.7} />
           <text x={x + 6} y={(ty(footHt) + ty(0)) / 2 + 3} fontSize="5.5" fill={P.purple} fontFamily={mono}>{fmt(footHt)} foot</text>
+          <text x={x + 6} y={ty(0) + 10} fontSize="6.5" fill={P.accent} fontFamily={mono}>{fmtI(rimTopH)} total</text>
         </g>); })()}
         <line x1={txL(maxOutR)} y1={ty(rimTopH + 2)} x2={tx(maxOutR)} y2={ty(rimTopH + 2)} stroke={`${P.blue}44`} strokeWidth={0.7} />
         <text x={cxv} y={ty(rimTopH + 2) - 5} textAnchor="middle" fontSize="7" fill={P.blue} fontFamily={mono}>{fmtI(rimDia)} ø rim</text>
@@ -1289,7 +1289,9 @@ function AppInner() {
   const p = isCustom
     ? { ...base, wallThickness: wallT, floor: { thickness: floorT }, foot: { outerRadius: footOR, innerRadius: footIR, height: footH }, rimLip: { height: lipH, overhang: lipOv }, outer: smoothOuter, rimDiameter: customRimDia, interiorDepth: customDepth }
     : { ...base, wallThickness: wallT, floor: { thickness: floorT }, foot: { outerRadius: footOR, innerRadius: footIR, height: footH }, rimLip: { height: lipH, overhang: lipOv } };
-  const bowls = nest(p, nB, gap);
+  const isStacking = STACKING_VESSELS.has(base.vessel);
+  const bowls = isStacking ? nestMugs(p, nB, gap) : nest(p, nB, gap);
+  const stackingInfo = isStacking ? validateMugStacking(p) : null;
   const vol = computeVolumes(p);
   const csRef = useRef(null);
 
@@ -1342,7 +1344,7 @@ function AppInner() {
         {/* ═══ DESIGN ═══ */}
         {tab === "design" && (<div>
           <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 4 }}>
-            <h2 style={{ fontFamily: serif, fontSize: 22, fontWeight: 600, color: P.text, margin: 0 }}>Bowl Anatomy</h2>
+            <h2 style={{ fontFamily: serif, fontSize: 22, fontWeight: 600, color: P.text, margin: 0 }}>{isStacking ? "Mug Anatomy" : "Bowl Anatomy"}</h2>
             {prof === "fargklar-real" && <span style={{ fontFamily: mono, fontSize: 9, color: P.inner, background: P.inner + "18", padding: "2px 6px", borderRadius: 3, border: `1px solid ${P.inner}33` }}>✦ REAL SVG DATA</span>}
             {isCustom && <span style={{ fontFamily: mono, fontSize: 9, color: P.accent, background: P.accent + "18", padding: "2px 6px", borderRadius: 3, border: `1px solid ${P.accent}33` }}>✎ CUSTOM</span>}
           </div>
@@ -1357,7 +1359,39 @@ function AppInner() {
                   <CustomProfileEditor outer={customOuter} onChange={setCustomOuter} rimDia={customRimDia} interiorDepth={customDepth} />
                 </Card>
               )}
-              <Card title="NESTING SET"><Sl imperial={imperial} l="Bowls" v={nB} fn={setNB} mn={2} mx={6} u="" /><Sl imperial={imperial} l="Gap" v={gap} fn={setGap} mn={1} mx={10} /></Card>
+              <Card title={isStacking ? "STACKING SET" : "NESTING SET"}>
+                <Sl imperial={imperial} l={isStacking ? "Mugs" : "Bowls"} v={nB} fn={setNB} mn={2} mx={isStacking ? 8 : 6} u="" />
+                {!isStacking && <Sl imperial={imperial} l="Gap" v={gap} fn={setGap} mn={1} mx={10} />}
+                {isStacking && <div style={{ fontFamily: mono, fontSize: 9, color: P.textFaint }}>Offset: {mm(computeNestingOffset(p))} per mug</div>}
+              </Card>
+              {isStacking && stackingInfo && (
+                <Card title="STACKING CONSTRAINTS" color={stackingInfo.valid ? P.inner : P.accent} glow={!stackingInfo.valid}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: stackingInfo.warnings.length ? 8 : 0 }}>
+                    <div style={{ fontFamily: mono, fontSize: 9 }}>
+                      <span style={{ color: P.textFaint }}>Draft </span>
+                      <span style={{ color: stackingInfo.draftAngle >= 3 && stackingInfo.draftAngle <= 12 ? P.inner : P.accent, fontWeight: 600 }}>{stackingInfo.draftAngle.toFixed(1)}°</span>
+                      <span style={{ color: P.textFaint, fontSize: 8 }}> (3–12°)</span>
+                    </div>
+                    <div style={{ fontFamily: mono, fontSize: 9 }}>
+                      <span style={{ color: P.textFaint }}>Offset </span>
+                      <span style={{ color: stackingInfo.nestingOffset >= 10 ? P.inner : P.accent, fontWeight: 600 }}>{mm(stackingInfo.nestingOffset)}</span>
+                      <span style={{ color: P.textFaint, fontSize: 8 }}> (≥10mm)</span>
+                    </div>
+                    <div style={{ fontFamily: mono, fontSize: 9 }}>
+                      <span style={{ color: P.textFaint }}>Efficiency </span>
+                      <span style={{ color: stackingInfo.efficiency >= 0.70 && stackingInfo.efficiency <= 0.90 ? P.inner : P.accent, fontWeight: 600 }}>{(stackingInfo.efficiency * 100).toFixed(0)}%</span>
+                      <span style={{ color: P.textFaint, fontSize: 8 }}> (70–90%)</span>
+                    </div>
+                    <div style={{ fontFamily: mono, fontSize: 9 }}>
+                      <span style={{ color: P.textFaint }}>Stack H </span>
+                      <span style={{ fontWeight: 600, color: P.text }}>{mm(computeStackHeight(p, nB))}</span>
+                    </div>
+                  </div>
+                  {stackingInfo.warnings.map((w, i) => (
+                    <div key={i} style={{ fontFamily: mono, fontSize: 8, color: P.accent, padding: "2px 0" }}>⚠ {w}</div>
+                  ))}
+                </Card>
+              )}
               <Card title="WALL & FLOOR" color={P.inner}><Sl imperial={imperial} l="Wall" v={wallT} fn={setWallT} mn={2} mx={12} st={0.5} /><Sl imperial={imperial} l="Floor" v={floorT} fn={setFloorT} mn={3} mx={20} st={0.5} /></Card>
               <Card title="FOOT RING" color={P.purple}>
                 <Sl imperial={imperial} l="Outer R" v={footOR} fn={setFootOR} mn={15} mx={100} />
@@ -1452,7 +1486,7 @@ function AppInner() {
                 </label>
                 <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
                   <input type="checkbox" checked={showN} onChange={e => setShowN(e.target.checked)} style={{ accentColor: P.accent }} />
-                  <span style={{ fontFamily: mono, fontSize: 10, color: P.textMuted }}>Nesting</span>
+                  <span style={{ fontFamily: mono, fontSize: 10, color: P.textMuted }}>{isStacking ? "Stacking" : "Nesting"}</span>
                 </label>
                 <div style={{ width: 1, height: 18, background: P.cardBorder }} />
                 <div style={{ display: "flex", gap: 2 }}>
@@ -1494,27 +1528,34 @@ function AppInner() {
                     }}>B{i + 1} · {mmI(b.rim)}</button>
                   ))}
                 </div>
-                <CrossSection p={p} bowls={bowls} showNesting={showN} showAnnotations={showA} rimType={rimType} selectedBowl={selectedBowl} onSelectBowl={setSelectedBowl} imperial={imperial} svgRef={csRef} />
+                <CrossSection p={p} bowls={bowls} showNesting={showN} showAnnotations={showA} rimType={rimType} selectedBowl={selectedBowl} onSelectBowl={setSelectedBowl} imperial={imperial} svgRef={csRef} isStacking={isStacking} />
                 <button onClick={() => exportCrossSection(csRef.current, p.name)} style={{ position: "absolute", top: 8, right: 8, background: P.bgDeep, border: `1px solid ${P.cardBorder}`, borderRadius: 4, padding: "2px 6px", cursor: "pointer", fontFamily: mono, fontSize: 8, color: P.textFaint }}>↓ SVG</button>
               </Card>
 
               {showRibs && (
-                <Card title={showN ? "RIB TOOLS — ONE PER BOWL" : "RIB TOOL"} color={P.accent} glow>
+                <Card title={isStacking ? "RIB TOOL — SINGLE" : (showN ? "RIB TOOLS — ONE PER BOWL" : "RIB TOOL")} color={P.accent} glow>
                   <div style={{ fontFamily: mono, fontSize: 9, color: P.textFaint, marginBottom: 8 }}>
-                    Combined inner + outer wall profile · flat base = wheel true · {mm(ribGap)} gap
+                    {isStacking
+                      ? `Single rib for all identical mugs · flat base · ${mm(ribGap)} gap`
+                      : `Combined inner + outer wall profile · flat base = wheel true · ${mm(ribGap)} gap`}
                   </div>
-                  <RibToolView bowls={showN ? bowls : [bowls[0]]} p={p} ribGap={ribGap} profileName={p.name} rimType={rimType} showRim={showRibRim} imperial={imperial} />
+                  <RibToolView bowls={isStacking ? [bowls[0]] : (showN ? bowls : [bowls[0]])} p={p} ribGap={ribGap} profileName={p.name} rimType={rimType} showRim={showRibRim} imperial={imperial} />
                 </Card>
               )}
 
-              <div className="tf-stats" style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 5 }}>
+              <div className="tf-stats" style={{ display: "grid", gridTemplateColumns: isStacking ? "repeat(4,1fr)" : "repeat(4,1fr)", gap: 5 }}>
                 <Stat l="Volume" v={imperial ? vol.interiorOz.toFixed(1) + ' oz' : vol.interiorML.toFixed(0) + ' mL'} c={P.blue} />
                 <Stat l="Clay" v={imperial ? vol.clayLbs.toFixed(2) + ' lb' : vol.clayWetG.toFixed(0) + ' g'} c={P.accent} />
                 <Stat l="Glaze" v={imperial ? vol.glazeAreaIn2.toFixed(0) + ' in²' : (vol.glazeArea / 100).toFixed(0) + ' cm²'} c={P.inner} />
                 <Stat l="Rim ø" v={mmI(p.rimDiameter)} />
               </div>
-              <div className="tf-stats" style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 5 }}>
-                {(() => { const f = v => imperial ? (v / 25.4).toFixed(2) + '"' : v.toFixed(0) + 'mm'; return (<>
+              <div className="tf-stats" style={{ display: "grid", gridTemplateColumns: isStacking ? "repeat(4,1fr)" : "repeat(5,1fr)", gap: 5 }}>
+                {isStacking && stackingInfo ? (<>
+                  <Stat l="Draft α" v={stackingInfo.draftAngle.toFixed(1) + '°'} c={stackingInfo.draftAngle >= 3 && stackingInfo.draftAngle <= 12 ? P.inner : P.accent} />
+                  <Stat l="Offset" v={mm(stackingInfo.nestingOffset)} c={P.purple} />
+                  <Stat l="Efficiency" v={(stackingInfo.efficiency * 100).toFixed(0) + '%'} c={stackingInfo.efficiency >= 0.70 && stackingInfo.efficiency <= 0.90 ? P.inner : P.accent} />
+                  <Stat l="Stack H" v={mm(computeStackHeight(p, nB))} />
+                </>) : (() => { const f = v => imperial ? (v / 25.4).toFixed(2) + '"' : v.toFixed(0) + 'mm'; return (<>
                   <Stat l="Total H" v={f(p.interiorDepth + floorT + footH)} />
                   <Stat l="Depth" v={f(p.interiorDepth)} c={P.inner} />
                   <Stat l="Foot ø" v={f(footOR * 2)} c={P.purple} />
@@ -1522,9 +1563,9 @@ function AppInner() {
                   <Stat l="Gap" v={mm(ribGap)} c={P.accent} />
                 </>); })()}
               </div>
-              <Card title="NESTING TABLE">
+              <Card title={isStacking ? "STACKING TABLE" : "NESTING TABLE"}>
                 <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontFamily: mono, fontSize: 10 }}>
-                  <thead><tr>{["", "Bowl", "Rim ø", "Height", "Volume", "Clay", "Foot ø", "Scale"].map(h => <th key={h} style={{ padding: "4px 6px", textAlign: "left", color: P.textFaint, borderBottom: `1px solid ${P.cardBorder}`, fontSize: 9 }}>{h}</th>)}</tr></thead>
+                  <thead><tr>{(isStacking ? ["", "Mug", "Rim ø", "Height", "Volume", "Clay", "Offset", "Stack H"] : ["", "Bowl", "Rim ø", "Height", "Volume", "Clay", "Foot ø", "Scale"]).map(h => <th key={h} style={{ padding: "4px 6px", textAlign: "left", color: P.textFaint, borderBottom: `1px solid ${P.cardBorder}`, fontSize: 9 }}>{h}</th>)}</tr></thead>
                   <tbody>{bowls.map((b, i) => {
                     const bv = computeVolumes(p, b.s);
                     return <tr key={i}>
@@ -1534,14 +1575,19 @@ function AppInner() {
                     <td style={{ padding: "4px 6px", color: P.textMuted }}>{mm(b.h)}</td>
                     <td style={{ padding: "4px 6px", color: P.blue }}>{imperial ? bv.interiorOz.toFixed(1) + ' oz' : bv.interiorML.toFixed(0) + ' mL'}</td>
                     <td style={{ padding: "4px 6px", color: P.accent }}>{imperial ? bv.clayLbs.toFixed(2) + ' lb' : bv.clayWetG.toFixed(0) + ' g'}</td>
-                    <td style={{ padding: "4px 6px", color: P.purple }}>{mmI(b.footOuter * 2)}</td>
-                    <td style={{ padding: "4px 6px", color: P.textFaint }}>{(b.s * 100).toFixed(0)}%</td>
+                    {isStacking ? <>
+                      <td style={{ padding: "4px 6px", color: P.purple }}>{mm(b.baseY)}</td>
+                      <td style={{ padding: "4px 6px", color: P.textFaint }}>{mm(b.baseY + b.h)}</td>
+                    </> : <>
+                      <td style={{ padding: "4px 6px", color: P.purple }}>{mmI(b.footOuter * 2)}</td>
+                      <td style={{ padding: "4px 6px", color: P.textFaint }}>{(b.s * 100).toFixed(0)}%</td>
+                    </>}
                   </tr>; })}</tbody>
                 </table></div>
               </Card>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                <Btn full onClick={() => exportSVG(bowls, p, ribGap)}>↓ RIB SVG (LASER CUT)</Btn>
-                <Btn full onClick={() => exportDXF(bowls, p, ribGap)} color={P.inner}>↓ RIB DXF (LASER CUT)</Btn>
+                <Btn full onClick={() => exportSVG(isStacking ? [bowls[0]] : bowls, p, ribGap)}>{isStacking ? "↓ RIB SVG (SINGLE)" : "↓ RIB SVG (LASER CUT)"}</Btn>
+                <Btn full onClick={() => exportDXF(isStacking ? [bowls[0]] : bowls, p, ribGap)} color={P.inner}>{isStacking ? "↓ RIB DXF (SINGLE)" : "↓ RIB DXF (LASER CUT)"}</Btn>
                 <Btn full onClick={() => exportProfile(p, p.name)} color={P.blue}>↓ PROFILE JSON</Btn>
               </div>
             </div>
@@ -1566,16 +1612,16 @@ function AppInner() {
               <Stat l="Foot ø" v={mmI(footOR * 2)} c={P.purple} /><Stat l="Rim" v={RIM_TYPES[rimType]?.name} c={P.accent} /><Stat l="Gap" v={mm(ribGap)} c={P.accent} />
               <Stat l="Profile" v={p.name.split(" ")[0]} /><Stat l="Source" v={isCustom ? "Custom" : "Data"} c={P.inner} />
             </div></Card>
-            <Card title="CROSS-SECTION"><CrossSection p={p} bowls={bowls} showNesting={true} showAnnotations={false} rimType={rimType} /></Card>
+            <Card title="CROSS-SECTION"><CrossSection p={p} bowls={bowls} showNesting={true} showAnnotations={false} rimType={rimType} isStacking={isStacking} /></Card>
           </div>
           {/* 3D silhouette spin */}
           <Card title="3D WIREFRAME">
             <Bowl3D p={p} footH={footH} floorT={floorT} wallT={wallT} />
           </Card>
           {/* Per-bowl breakdown */}
-          <Card title="NESTING SET BREAKDOWN">
+          <Card title={isStacking ? "STACKING SET BREAKDOWN" : "NESTING SET BREAKDOWN"}>
             <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontFamily: mono, fontSize: 10 }}>
-              <thead><tr>{["", "Bowl", "Rim ø", "Height", "Volume", "Clay", "Glaze", "Scale"].map(h => <th key={h} style={{ padding: "4px 6px", textAlign: "left", color: P.textFaint, borderBottom: `1px solid ${P.cardBorder}`, fontSize: 9 }}>{h}</th>)}</tr></thead>
+              <thead><tr>{(isStacking ? ["", "Mug", "Rim ø", "Height", "Volume", "Clay", "Glaze", "Offset"] : ["", "Bowl", "Rim ø", "Height", "Volume", "Clay", "Glaze", "Scale"]).map(h => <th key={h} style={{ padding: "4px 6px", textAlign: "left", color: P.textFaint, borderBottom: `1px solid ${P.cardBorder}`, fontSize: 9 }}>{h}</th>)}</tr></thead>
               <tbody>{bowls.map((b, i) => {
                 const bv = computeVolumes(p, b.s);
                 return <tr key={i} style={{ borderBottom: `1px solid ${P.cardBorder}22` }}>
@@ -1586,7 +1632,9 @@ function AppInner() {
                   <td style={{ padding: "5px 6px", color: P.blue }}>{imperial ? bv.interiorOz.toFixed(1) + ' oz' : bv.interiorML.toFixed(0) + ' mL'}</td>
                   <td style={{ padding: "5px 6px", color: P.accent }}>{imperial ? bv.clayLbs.toFixed(2) + ' lb' : bv.clayWetG.toFixed(0) + ' g'}</td>
                   <td style={{ padding: "5px 6px", color: P.inner }}>{imperial ? bv.glazeAreaIn2.toFixed(0) + ' in²' : (bv.glazeArea / 100).toFixed(0) + ' cm²'}</td>
-                  <td style={{ padding: "5px 6px", color: P.textFaint }}>{(b.s * 100).toFixed(0)}%</td>
+                  {isStacking
+                    ? <td style={{ padding: "5px 6px", color: P.purple }}>{mm(b.baseY)}</td>
+                    : <td style={{ padding: "5px 6px", color: P.textFaint }}>{(b.s * 100).toFixed(0)}%</td>}
                 </tr>; })}
                 {/* Totals row */}
                 <tr style={{ borderTop: `2px solid ${P.cardBorder}` }}>
@@ -1604,8 +1652,8 @@ function AppInner() {
             </Card>
           )}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginTop: 10 }}>
-            <Btn full onClick={() => exportSVG(bowls, p, ribGap)}>↓ RIB SVG</Btn>
-            <Btn full onClick={() => exportDXF(bowls, p, ribGap)} color={P.inner}>↓ RIB DXF</Btn>
+            <Btn full onClick={() => exportSVG(isStacking ? [bowls[0]] : bowls, p, ribGap)}>{isStacking ? "↓ RIB SVG (SINGLE)" : "↓ RIB SVG"}</Btn>
+            <Btn full onClick={() => exportDXF(isStacking ? [bowls[0]] : bowls, p, ribGap)} color={P.inner}>{isStacking ? "↓ RIB DXF (SINGLE)" : "↓ RIB DXF"}</Btn>
             <Btn full onClick={() => exportProfile(p, p.name)} color={P.blue}>↓ PROFILE JSON</Btn>
           </div>
         </div>)}

@@ -368,7 +368,7 @@ export function rimGeometry(type, iR, oR, h, lipH, overhang, wt, tx, ty, side) {
 export function generateRibPolygon(bowl, p, ribGap, opts = {}) {
   const { filletRadius = 2.5, holeRadius = 3.5 } = opts;
 
-  const outerStepH = bowl.footH;
+  const outerStepH = bowl.footH + bowl.floorT; // foot + floor = full base before wall starts
   const innerWall = bowl.inner; // already filleted from genInner
   const outerWall = bowl.outer;
 
@@ -380,8 +380,14 @@ export function generateRibPolygon(bowl, p, ribGap, opts = {}) {
   const totalH = Math.max(outerStepH + outerWallH, innerWallH);
   const gap = ribGap;
 
-  // Bottom-right fillet (outer step corner)
-  const fr = Math.max(0.5, Math.min(filletRadius, outerStepH * 0.4, gap * 0.1));
+  // Foot ring geometry: foot outer radius vs wall base outer radius
+  // determines the ledge shape in the step zone
+  const wallBaseOuter = outerBaseR + p.wallThickness;
+  const footDelta = wallBaseOuter - bowl.footOuter; // >0 if wall wider than foot
+  const footX = gap + footDelta; // foot ring x position in rib coords
+
+  // Bottom-right fillet (at foot corner)
+  const fr = Math.max(0.5, Math.min(filletRadius, bowl.footH * 0.4, gap * 0.1));
 
   // Quarter-circle arc approximation
   const filletArc = (cx, cy, r, startDeg, endDeg, n = 8) => {
@@ -394,22 +400,25 @@ export function generateRibPolygon(bowl, p, ribGap, opts = {}) {
   };
 
   // Assemble polygon:
-  // bottom-left → bottom → bottom-right fillet → right step →
-  // outer curve up → inner curve down (with fillet baked in) → close
+  // bottom-left → bottom → bottom-right fillet → foot ring →
+  // floor transition → outer curve up → inner curve down → close
   const points = [];
 
-  // 1. Bottom edge
+  // 1. Bottom edge (extends to foot ring position)
   points.push([0, 0]);
-  points.push([gap - fr, 0]);
+  points.push([footX - fr, 0]);
 
-  // 2. Bottom-right fillet: center (gap-fr, fr), arc 270°→360°
-  const brArc = filletArc(gap - fr, fr, fr, 270, 360);
+  // 2. Bottom-right fillet at foot position
+  const brArc = filletArc(footX - fr, fr, fr, 270, 360);
   for (let i = 1; i < brArc.length; i++) points.push(brArc[i]);
 
-  // 3. Right edge: vertical through step zone (outer = foot only)
+  // 3. Right edge: foot ring (vertical from fillet to foot height)
+  points.push([footX, bowl.footH]);
+
+  // 4. Right edge: floor zone transition (foot to wall base)
   points.push([gap, outerStepH]);
 
-  // 4. Right edge: outer wall curve (foot top → rim)
+  // 4. Right edge: outer wall curve (step top → rim)
   for (let i = 0; i < outerWall.length; i++) {
     const sweep = outerWall[i][0] - outerBaseR;
     points.push([gap - sweep, outerStepH + outerWall[i][1]]);
@@ -758,6 +767,82 @@ export function catmullRomResample(points, count = 30, tension = 0.5) {
 export function genInner(o, wt, filletRadius = 5) {
   const raw = o.map(([x, y], i) => [Math.max(x - wt * (1 + 0.3 * (1 - i / (o.length - 1))), 2), y]);
   return filletRadius > 0 ? applyInnerFillet(raw, filletRadius, 0) : raw;
+}
+
+// ═══════════════════════════════════════════════════════════
+// MUG STACKING — frustum-based vertical stacking geometry
+// ═══════════════════════════════════════════════════════════
+export const STACKING_VESSELS = new Set([VESSEL.mug, VESSEL.cup, VESSEL.tumbler]);
+
+// Draft angle α in degrees from first/last outer wall points
+export function computeDraftAngle(p) {
+  const base = p.outer[0];
+  const rim = p.outer[p.outer.length - 1];
+  const dR = rim[0] - base[0];
+  const dH = rim[1] - base[1];
+  if (dH <= 0) return 0;
+  return Math.atan(dR / dH) * (180 / Math.PI);
+}
+
+// Vertical nesting offset Δh = 2t / tan(α) in mm
+export function computeNestingOffset(p) {
+  const alpha = computeDraftAngle(p) * (Math.PI / 180);
+  if (alpha <= 0) return Infinity;
+  return (2 * p.wallThickness) / Math.tan(alpha);
+}
+
+// Nesting efficiency η = 1 − Δh/H
+export function computeNestingEfficiency(p) {
+  const wallHeight = p.outer[p.outer.length - 1][1] - p.outer[0][1];
+  if (wallHeight <= 0) return 0;
+  const dh = computeNestingOffset(p);
+  return 1 - dh / wallHeight;
+}
+
+// Stack height for n mugs: totalH + (n-1) × Δh
+export function computeStackHeight(p, n) {
+  const totalH = p.interiorDepth + p.floor.thickness + p.foot.height;
+  const dh = computeNestingOffset(p);
+  return totalH + (n - 1) * dh;
+}
+
+// Validate stacking constraints, return { valid, warnings, draftAngle, nestingOffset, efficiency }
+export function validateMugStacking(p) {
+  const draftAngle = computeDraftAngle(p);
+  const nestingOffset = computeNestingOffset(p);
+  const efficiency = computeNestingEfficiency(p);
+  const warnings = [];
+
+  if (draftAngle < 3) warnings.push(`Draft angle ${draftAngle.toFixed(1)}° below minimum 3°`);
+  if (draftAngle > 12) warnings.push(`Draft angle ${draftAngle.toFixed(1)}° above maximum 12°`);
+  if (nestingOffset < 10) warnings.push(`Nesting offset ${nestingOffset.toFixed(1)}mm below minimum 10mm`);
+  if (efficiency < 0.70) warnings.push(`Efficiency ${(efficiency * 100).toFixed(0)}% below target 70%`);
+  if (efficiency > 0.90) warnings.push(`Efficiency ${(efficiency * 100).toFixed(0)}% above target 90%`);
+
+  return { valid: warnings.length === 0, warnings, draftAngle, nestingOffset, efficiency };
+}
+
+// Stack n identical mugs with vertical offset (no scaling)
+export function nestMugs(p, n, gap, { innerFilletRadius = 5 } = {}) {
+  const dh = computeNestingOffset(p);
+  const bowls = [];
+  for (let i = 0; i < n; i++) {
+    const o = p.outer.map(([x, y]) => [x, y]);
+    const wallBase = o[0][0];
+    const footH = p.foot.height;
+    const floorT = p.floor.thickness;
+    const baseY = i * dh;
+    const th = p.interiorDepth + floorT + footH;
+
+    bowls.push({
+      i, label: `Mug ${i + 1}`, s: 1, outer: o,
+      inner: genInner(o, p.wallThickness, innerFilletRadius),
+      h: th, intDepth: p.interiorDepth, rim: p.rimDiameter,
+      footOuter: p.foot.outerRadius, footInner: p.foot.innerRadius,
+      footH, floorT, baseY, wallBase,
+    });
+  }
+  return bowls;
 }
 
 export function nest(p, n, gap, { innerFilletRadius = 5 } = {}) {

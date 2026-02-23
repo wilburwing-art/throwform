@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { VESSEL, PROFILES, computeVolumes, RIM_TYPES, rimGeometry, genInner, nest, applyInnerFillet, catmullRomResample } from "./geometry.js";
+import { VESSEL, PROFILES, computeVolumes, RIM_TYPES, rimGeometry, genInner, nest, nestMugs, STACKING_VESSELS, computeDraftAngle, computeNestingOffset, computeNestingEfficiency, computeStackHeight, validateMugStacking, applyInnerFillet, catmullRomResample } from "./geometry.js";
 
 // ═══════════════════════════════════════════════════════════
 // PROFILES data integrity
@@ -451,5 +451,225 @@ describe("catmullRomResample", () => {
     const custom = PROFILES.custom.outer;
     const out = catmullRomResample(custom, 30);
     expect(out.length).toBeGreaterThan(custom.length);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// STACKING_VESSELS
+// ═══════════════════════════════════════════════════════════
+describe("STACKING_VESSELS", () => {
+  it("contains mug, cup, tumbler", () => {
+    expect(STACKING_VESSELS.has(VESSEL.mug)).toBe(true);
+    expect(STACKING_VESSELS.has(VESSEL.cup)).toBe(true);
+    expect(STACKING_VESSELS.has(VESSEL.tumbler)).toBe(true);
+  });
+
+  it("does not contain bowl, plate, serving", () => {
+    expect(STACKING_VESSELS.has(VESSEL.bowl)).toBe(false);
+    expect(STACKING_VESSELS.has(VESSEL.plate)).toBe(false);
+    expect(STACKING_VESSELS.has(VESSEL.serving)).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// computeDraftAngle
+// ═══════════════════════════════════════════════════════════
+describe("computeDraftAngle", () => {
+  const mug = PROFILES["mug"];
+
+  it("returns positive for tapered mug", () => {
+    expect(computeDraftAngle(mug)).toBeGreaterThan(0);
+  });
+
+  it("returns reasonable range (1-15°)", () => {
+    const a = computeDraftAngle(mug);
+    expect(a).toBeGreaterThan(1);
+    expect(a).toBeLessThan(15);
+  });
+
+  it("matches known frustum calculation", () => {
+    const base = mug.outer[0];
+    const rim = mug.outer[mug.outer.length - 1];
+    const expected = Math.atan((rim[0] - base[0]) / (rim[1] - base[1])) * (180 / Math.PI);
+    expect(computeDraftAngle(mug)).toBeCloseTo(expected, 5);
+  });
+
+  it("works for every profile without throwing", () => {
+    for (const k of Object.keys(PROFILES)) {
+      expect(() => computeDraftAngle(PROFILES[k])).not.toThrow();
+    }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// computeNestingOffset
+// ═══════════════════════════════════════════════════════════
+describe("computeNestingOffset", () => {
+  const mug = PROFILES["mug"];
+
+  it("returns finite positive value", () => {
+    const offset = computeNestingOffset(mug);
+    expect(offset).toBeGreaterThan(0);
+    expect(Number.isFinite(offset)).toBe(true);
+  });
+
+  it("matches 2t/tan(α)", () => {
+    const alpha = computeDraftAngle(mug) * (Math.PI / 180);
+    const expected = (2 * mug.wallThickness) / Math.tan(alpha);
+    expect(computeNestingOffset(mug)).toBeCloseTo(expected, 5);
+  });
+
+  it("thicker walls produce larger offset", () => {
+    const thin = { ...mug, wallThickness: 3 };
+    const thick = { ...mug, wallThickness: 8 };
+    expect(computeNestingOffset(thick)).toBeGreaterThan(computeNestingOffset(thin));
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// computeNestingEfficiency
+// ═══════════════════════════════════════════════════════════
+describe("computeNestingEfficiency", () => {
+  it("returns value ≤ 1", () => {
+    for (const k of Object.keys(PROFILES)) {
+      if (STACKING_VESSELS.has(PROFILES[k].vessel)) {
+        const eff = computeNestingEfficiency(PROFILES[k]);
+        expect(eff).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it("cappuccino mug has positive efficiency (wide taper)", () => {
+    const eff = computeNestingEfficiency(PROFILES["cappuccino"]);
+    expect(eff).toBeGreaterThan(0);
+  });
+
+  it("negative efficiency means offset > wall height (poor stacking)", () => {
+    // Coffee mug has thick walls / shallow taper → Δh > wall height
+    const eff = computeNestingEfficiency(PROFILES["mug"]);
+    expect(eff).toBeLessThan(1);
+    // validateMugStacking should flag this
+    const result = validateMugStacking(PROFILES["mug"]);
+    expect(result.valid).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// computeStackHeight
+// ═══════════════════════════════════════════════════════════
+describe("computeStackHeight", () => {
+  const mug = PROFILES["mug"];
+
+  it("n=1 equals total height", () => {
+    const totalH = mug.interiorDepth + mug.floor.thickness + mug.foot.height;
+    expect(computeStackHeight(mug, 1)).toBeCloseTo(totalH, 5);
+  });
+
+  it("n mugs matches H + (n-1)*Δh", () => {
+    const totalH = mug.interiorDepth + mug.floor.thickness + mug.foot.height;
+    const dh = computeNestingOffset(mug);
+    expect(computeStackHeight(mug, 4)).toBeCloseTo(totalH + 3 * dh, 5);
+  });
+
+  it("more mugs = taller stack", () => {
+    expect(computeStackHeight(mug, 6)).toBeGreaterThan(computeStackHeight(mug, 3));
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// validateMugStacking
+// ═══════════════════════════════════════════════════════════
+describe("validateMugStacking", () => {
+  const mug = PROFILES["mug"];
+
+  it("returns all expected fields", () => {
+    const result = validateMugStacking(mug);
+    expect(result).toHaveProperty("valid");
+    expect(result).toHaveProperty("warnings");
+    expect(result).toHaveProperty("draftAngle");
+    expect(result).toHaveProperty("nestingOffset");
+    expect(result).toHaveProperty("efficiency");
+  });
+
+  it("warnings is an array", () => {
+    const result = validateMugStacking(mug);
+    expect(Array.isArray(result.warnings)).toBe(true);
+  });
+
+  it("flags draft angle below 3°", () => {
+    // Create a nearly-straight mug (very small taper)
+    const straight = { ...mug, outer: [[40, 0], [40.1, 10], [40.2, 20], [40.3, 30], [40.4, 80]] };
+    const result = validateMugStacking(straight);
+    expect(result.warnings.some(w => w.includes("Draft angle") && w.includes("below"))).toBe(true);
+  });
+
+  it("returns valid boolean", () => {
+    const result = validateMugStacking(mug);
+    expect(typeof result.valid).toBe("boolean");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// nestMugs
+// ═══════════════════════════════════════════════════════════
+describe("nestMugs", () => {
+  const mug = PROFILES["mug"];
+
+  it("returns correct count", () => {
+    const bowls = nestMugs(mug, 4, 3);
+    expect(bowls.length).toBe(4);
+  });
+
+  it("all mugs have s=1 (no scaling)", () => {
+    const bowls = nestMugs(mug, 3, 3);
+    for (const b of bowls) {
+      expect(b.s).toBe(1);
+    }
+  });
+
+  it("first mug has baseY=0", () => {
+    const bowls = nestMugs(mug, 3, 3);
+    expect(bowls[0].baseY).toBe(0);
+  });
+
+  it("baseY increments by Δh", () => {
+    const bowls = nestMugs(mug, 4, 3);
+    const dh = computeNestingOffset(mug);
+    for (let i = 1; i < bowls.length; i++) {
+      expect(bowls[i].baseY).toBeCloseTo(i * dh, 5);
+    }
+  });
+
+  it("all mugs have same rim diameter", () => {
+    const bowls = nestMugs(mug, 4, 3);
+    for (const b of bowls) {
+      expect(b.rim).toBe(mug.rimDiameter);
+    }
+  });
+
+  it("labels say Mug", () => {
+    const bowls = nestMugs(mug, 3, 3);
+    expect(bowls[0].label).toBe("Mug 1");
+    expect(bowls[1].label).toBe("Mug 2");
+    expect(bowls[2].label).toBe("Mug 3");
+  });
+
+  it("has same schema fields as nest() output", () => {
+    const nestBowls = nest(mug, 3, 3);
+    const stackBowls = nestMugs(mug, 3, 3);
+    const nestKeys = Object.keys(nestBowls[0]).sort();
+    const stackKeys = Object.keys(stackBowls[0]).sort();
+    expect(stackKeys).toEqual(nestKeys);
+  });
+
+  it("works for every stacking vessel profile", () => {
+    for (const k of Object.keys(PROFILES)) {
+      if (STACKING_VESSELS.has(PROFILES[k].vessel)) {
+        expect(() => nestMugs(PROFILES[k], 4, 3)).not.toThrow();
+        const bowls = nestMugs(PROFILES[k], 4, 3);
+        expect(bowls.length).toBe(4);
+        expect(bowls[0].s).toBe(1);
+      }
+    }
   });
 });

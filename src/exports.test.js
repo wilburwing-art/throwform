@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { PROFILES, nest, generateRibPolygon, generateRibSVG, generateTemplateSVG, generateRibDXF, generateProfileJSON } from "./geometry.js";
+import { PROFILES, VESSEL, nest, nestMugs, STACKING_VESSELS, generateRibPolygon, generateRibSVG, generateTemplateSVG, generateRibDXF, generateProfileJSON } from "./geometry.js";
 
 const profileKeys = Object.keys(PROFILES);
 const ribGaps = [30, 50.8, 70];
@@ -395,5 +395,49 @@ describe("generateProfileJSON", () => {
     const json = generateProfileJSON(p, "My Custom Bowl");
     const data = JSON.parse(json);
     expect(data.name).toBe("My Custom Bowl");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// Export compatibility with nestMugs output
+// ═══════════════════════════════════════════════════════════
+const stackingKeys = profileKeys.filter(k => STACKING_VESSELS.has(PROFILES[k].vessel));
+
+describe("generateRibPolygon — nestMugs output", () => {
+  it.each(stackingKeys)("%s — works with nestMugs output", (k) => {
+    const p = PROFILES[k];
+    const bowls = nestMugs(p, 3, 3);
+    const poly = generateRibPolygon(bowls[0], p, 50.8);
+    expect(poly.points.length).toBeGreaterThan(10);
+    expect(poly.width).toBeGreaterThan(0);
+    expect(poly.height).toBeGreaterThan(0);
+    poly.points.forEach(([x, y]) => {
+      expect(Number.isFinite(x)).toBe(true);
+      expect(Number.isFinite(y)).toBe(true);
+    });
+  });
+});
+
+describe("generateRibSVG — single mug", () => {
+  it.each(stackingKeys)("%s — works with single mug (no NaN)", (k) => {
+    const p = PROFILES[k];
+    const bowls = nestMugs(p, 3, 3);
+    const svg = generateRibSVG([bowls[0]], p, 50.8);
+    expect(svg).toContain("<svg");
+    expect(svg).toContain("</svg>");
+    expect(svg).not.toContain("NaN");
+    expect(svg).not.toContain("Infinity");
+  });
+});
+
+describe("generateRibDXF — single mug", () => {
+  it.each(stackingKeys)("%s — works with single mug (no NaN)", (k) => {
+    const p = PROFILES[k];
+    const bowls = nestMugs(p, 3, 3);
+    const dxf = generateRibDXF([bowls[0]], p, 50.8);
+    expect(dxf).toContain("HEADER");
+    expect(dxf).toContain("EOF");
+    expect(dxf).not.toContain("NaN");
+    expect(dxf).not.toContain("Infinity");
   });
 });
